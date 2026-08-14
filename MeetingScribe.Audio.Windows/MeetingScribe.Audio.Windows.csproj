@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Windows-only project (NAudio/WASAPI). On a non-Windows build host, targeting
+    net10.0-windows fails hard (NETSDK1073: FrameworkReference
+    'Microsoft.WindowsDesktop.App.WindowsForms' not recognized - the Windows Desktop
+    targeting pack simply isn't installed/installable there). Rather than requiring a
+    Windows machine to build the whole solution, this project targets plain net10.0
+    and compiles no sources on non-Windows hosts, producing an empty placeholder
+    assembly. Nothing here changes what a Windows build produces: on a Windows host
+    this is still net10.0-windows with NAudio and the full MeetingRecorder.
+  -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(OS)' != 'Windows_NT'">
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <PackageReference Include="NAudio" Version="2.3.0" />
+  </ItemGroup>
+
+  <!-- Non-Windows hosts: exclude all Windows/NAudio-dependent sources so this builds
+       as an empty placeholder assembly instead of failing to compile COM/WASAPI types
+       against a package that isn't even Windows-runnable here. -->
+  <ItemGroup Condition="'$(OS)' != 'Windows_NT'">
+    <Compile Remove="**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingScribe.Audio.Abstractions\MeetingScribe.Audio.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NativeLibraryName>libmeetingscribe_mac_audio.dylib</NativeLibraryName>
+    <NativeLibraryPath>$(MSBuildProjectDirectory)/native/$(NativeLibraryName)</NativeLibraryPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingScribe.Audio.Abstractions\MeetingScribe.Audio.Abstractions.csproj" />
+  </ItemGroup>
+
+  <!-- Declared at project scope (not inside the target) so MSBuild's Inputs/Outputs
+       incremental-build comparison on BuildMacNativeAudioHelper can see these items
+       before the target body runs. -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <MacNativeSource Include="$(MSBuildProjectDirectory)/native/*.m" />
+    <MacNativeHeader Include="$(MSBuildProjectDirectory)/native/*.h" />
+  </ItemGroup>
+
+  <!--
+    Builds the Objective-C ScreenCaptureKit/AVFoundation/CoreAudio helper dylib that
+    MacAudioPlatform P/Invokes into. Only runs when actually building on a macOS host -
+    clang and the macOS SDK frameworks used here (ScreenCaptureKit, AVFoundation,
+    CoreAudio, CoreMedia) do not exist on a Windows/Linux build agent, and this project
+    is still expected to build (as a managed-only assembly, no native capture) there -
+    see MacAudioPlatform.cs for the "native library missing" fallback behavior.
+  -->
+  <!--
+    Hooked to BeforeBuild (not Build): Build's own copy-to-output-directory step
+    (CopyFilesToOutputDirectory) runs as one of Build's DependsOnTargets, which execute
+    *before* Build's own body - and therefore before any BeforeTargets="Build" hook
+    fires. BeforeBuild is the SDK's dedicated early extensibility point and reliably
+    runs ahead of CoreCompile/Copy. Verified: with BeforeTargets="Build", a clean
+    `dotnet build` failed MSB3030 (file not found) because the copy step ran first;
+    switching to BeforeBuild (plus BeforePublish for `dotnet publish`) fixed it.
+  -->
+  <Target Name="BuildMacNativeAudioHelper"
+          BeforeTargets="BeforeBuild;BeforePublish"
+          Condition="$([MSBuild]::IsOSPlatform('OSX'))"
+          Inputs="@(MacNativeSource);@(MacNativeHeader)"
+          Outputs="$(NativeLibraryPath)">
+    <!-- MSBuild's own Inputs/Outputs timestamp comparison (above) skips this Exec on
+         a rebuild where no source/header changed since the dylib was last built. -->
+    <Exec
+      Command="clang -x objective-c -fno-objc-arc -dynamiclib -O2 -Wall -install_name @rpath/$(NativeLibraryName) -framework AVFoundation -framework AppKit -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework IOKit -framework ScreenCaptureKit -framework Foundation -framework CoreGraphics -o &quot;$(NativeLibraryPath)&quot; @(MacNativeSource -&gt; '&quot;%(FullPath)&quot;', ' ')"
+      WorkingDirectory="$(MSBuildProjectDirectory)/native" />
+  </Target>
+
+  <!--
+    Not gated on Exists(): on a fresh clone this file doesn't exist yet at project-
+    evaluation time, but BuildMacNativeAudioHelper (BeforeTargets="Build") creates it
+    before the Build target's own copy-to-output-directory step runs later in the same
+    invocation, so it's present by the time this item is actually copied.
+  -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <None Include="native/$(NativeLibraryName)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>$(NativeLibraryName)</Link>
+    </None>
+  </ItemGroup>
+
+</Project>

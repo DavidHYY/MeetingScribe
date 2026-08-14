@@ -1,0 +1,35 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+dist/
+publish_out/
+*.user
+
+# Built native artifact from MeetingScribe.Audio.Mac's BuildMacNativeAudioHelper
+# MSBuild target (clang output) - generated from native/*.m and native/*.h on every
+# macOS build, must not be committed (same reasoning as bin/obj above).
+MeetingScribe.Audio.Mac/native/*.dylib
+
+# .NET / Visual Studio
+.vs/
+*.suo
+
+# Meeting artefacts - audio, downloaded Whisper models, transcripts, minutes.
+# These must NEVER be committed: this app is used for real customer meetings
+# and its output directories can land anywhere on disk, not just under a
+# fixed folder, so these are blocked by extension/name pattern rather than
+# by path.
+*.wav
+*.mp3
+*.mp4
+*.bin
+*.vtt
+*.tsv
+transcript*.txt
+transcript*.json
+minutes*.md
+meta.json
+
+# OS cruft
+Thumbs.db
+.DS_Store

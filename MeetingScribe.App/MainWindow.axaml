@@ -1,0 +1,341 @@
+<Window x:Class="MeetingScribe.App.MainWindow"
+        xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:MeetingScribe.App.ViewModels"
+        Title="MeetingScribe" Height="820" Width="1200" MinHeight="640" MinWidth="880"
+        Icon="avares://MeetingScribe.App/Assets/icon.ico"
+        Background="{DynamicResource App.WindowBackground}"
+        FontFamily="Segoe UI, Inter, Sans Serif" FontSize="13">
+
+    <Grid Margin="18" RowDefinitions="Auto,Auto,*,Auto">
+
+        <!-- ============================================================
+             Header: meeting title, live status pill, elapsed time, and
+             the single Start/Stop action. This row is always visible and
+             always tells the truth about what the app is doing right now
+             (requirement: "Honest state").
+             ============================================================ -->
+        <Border Grid.Row="0" Classes="card" Margin="0,0,0,12">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+
+                <StackPanel Grid.Column="0" Spacing="10" Margin="0,0,20,0" VerticalAlignment="Center">
+                    <TextBox Classes="title-input" Text="{Binding MeetingTitle}"
+                             IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBoolConverter}}"
+                             PlaceholderText="Meeting title"/>
+
+                    <Border Classes="status-pill" HorizontalAlignment="Left"
+                            Classes.busy="{Binding IsBusy}"
+                            Classes.recording="{Binding IsRecording}"
+                            Classes.hasError="{Binding ErrorMessage, Converter={StaticResource NullToVisibleConverter}}">
+                        <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                            <Ellipse Classes="status-dot" Width="8" Height="8" VerticalAlignment="Center"/>
+                            <TextBlock Classes="status-text" Text="{Binding StatusText}"
+                                       VerticalAlignment="Center" MaxWidth="460" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,24,0" Spacing="2">
+                    <TextBlock Text="ELAPSED" Classes="field-label" HorizontalAlignment="Center" Margin="0"/>
+                    <TextBlock Classes="elapsed" Text="{Binding ElapsedDisplay}"/>
+                </StackPanel>
+
+                <Grid Grid.Column="2" VerticalAlignment="Center">
+                    <Button Classes="start-action" Content="&#9679; Start" Command="{Binding StartCommand}"
+                            IsVisible="{Binding IsRecording, Converter={StaticResource InverseBoolToVisibleConverter}}"/>
+                    <Button Classes="stop-action" Content="&#9632; Stop" Command="{Binding StopCommand}"
+                            IsVisible="{Binding IsRecording, Converter={StaticResource BoolToVisibleConverter}}"/>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- ============================================================
+             Device setup. Pre-meeting concern: full picker cards while
+             idle, collapsed to a one-line summary once recording starts
+             so the transcript can dominate (requirement: visual
+             hierarchy). Both states hold the exact same underlying
+             controls/bindings as before - nothing here is new state.
+             ============================================================ -->
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+
+            <Grid ColumnDefinitions="*,*,Auto"
+                  IsVisible="{Binding IsRecording, Converter={StaticResource InverseBoolToVisibleConverter}}">
+
+                <Border Grid.Column="0" Classes="card" Margin="0,0,6,0" Padding="14">
+                    <StackPanel Spacing="8">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Grid.Column="0" Classes="h2" Text="MICROPHONE" Margin="0"/>
+                            <CheckBox Grid.Column="1" Content="Enabled" IsChecked="{Binding MicrophoneEnabled}"
+                                      IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBoolConverter}}"/>
+                        </Grid>
+                        <ComboBox ItemsSource="{Binding MicrophoneDevices}" SelectedItem="{Binding SelectedMicDevice}"
+                                  IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBoolConverter}}"
+                                  HorizontalAlignment="Stretch"/>
+                        <ProgressBar Classes="level-meter" Value="{Binding MicPeak, Mode=OneWay}"
+                                     Foreground="{DynamicResource App.Mic}"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="1" Classes="card" Margin="6,0,6,0" Padding="14">
+                    <StackPanel Spacing="8">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Grid.Column="0" Classes="h2" Text="SYSTEM AUDIO (LOOPBACK)" Margin="0"/>
+                            <CheckBox Grid.Column="1" Content="Enabled" IsChecked="{Binding SystemAudioEnabled}"
+                                      IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBoolConverter}}"/>
+                        </Grid>
+                        <ComboBox ItemsSource="{Binding SystemAudioDevices}" SelectedItem="{Binding SelectedSystemDevice}"
+                                  IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBoolConverter}}"
+                                  HorizontalAlignment="Stretch"/>
+                        <ProgressBar Classes="level-meter" Value="{Binding SystemPeak, Mode=OneWay}"
+                                     Foreground="{DynamicResource App.System}"/>
+                    </StackPanel>
+                </Border>
+
+                <Button Grid.Column="2" Classes="toolbar" Content="Refresh Devices"
+                        Command="{Binding RefreshDevicesCommand}"
+                        VerticalAlignment="Bottom" Margin="6,0,0,0"/>
+            </Grid>
+
+            <Border Classes="device-compact"
+                    IsVisible="{Binding IsRecording, Converter={StaticResource BoolToVisibleConverter}}">
+                <StackPanel Orientation="Horizontal" Spacing="20">
+                    <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding MicrophoneEnabled}">
+                        <Ellipse Width="7" Height="7" Fill="{DynamicResource App.Mic}" VerticalAlignment="Center"/>
+                        <TextBlock Classes="secondary" VerticalAlignment="Center">
+                            <Run Text="Mic:"/>
+                            <Run Text="{Binding SelectedMicDevice.DisplayName}"/>
+                        </TextBlock>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding SystemAudioEnabled}">
+                        <Ellipse Width="7" Height="7" Fill="{DynamicResource App.System}" VerticalAlignment="Center"/>
+                        <TextBlock Classes="secondary" VerticalAlignment="Center">
+                            <Run Text="System:"/>
+                            <Run Text="{Binding SelectedSystemDevice.DisplayName}"/>
+                        </TextBlock>
+                    </StackPanel>
+                    <TextBlock Classes="caption" Text="Device setup is locked while recording." VerticalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- ============================================================
+             Tabs. The transcript is the product - it gets the full
+             remaining height; Minutes and Settings share the same space
+             when selected.
+             ============================================================ -->
+        <TabControl Grid.Row="2">
+            <TabItem Header="Live Transcript">
+                <Border Classes="card" Margin="0,10,0,0" Padding="10">
+                    <ListBox x:Name="LiveTranscriptListBox" Classes="transcript"
+                             ItemsSource="{Binding LiveTranscriptLines}"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="vm:TranscriptLineViewModel">
+                                <Grid ColumnDefinitions="58,Auto,*" RowDefinitions="Auto,Auto" Margin="0,3">
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Timestamp}"
+                                               Classes="mono secondary" VerticalAlignment="Top" Margin="0,2,0,0"/>
+                                    <Border Grid.Row="0" Grid.Column="1" Classes="source-badge"
+                                            Background="{Binding SourceBrush}" Margin="4,0,8,0">
+                                        <TextBlock Text="{Binding SourceLabel}"/>
+                                    </Border>
+                                    <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap"/>
+
+                                    <!-- English live translation, when live translation is on for this meeting -
+                                         see TranscriptLineViewModel.TranslationDisplay. Indented under the
+                                         original line, dimmed + italic so the relationship to the source line
+                                         above is unmistakable; only rendered when there is something to show. -->
+                                    <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding TranslationDisplay}"
+                                               IsVisible="{Binding HasTranslationDisplay}"
+                                               TextWrapping="Wrap" FontStyle="Italic"
+                                               Foreground="{DynamicResource App.Translation}"
+                                               Margin="0,3,0,0"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Border>
+            </TabItem>
+
+            <TabItem Header="Minutes">
+                <Border Classes="card" Margin="0,10,0,0" Padding="14">
+                    <DockPanel>
+                        <Button DockPanel.Dock="Top" Classes="toolbar" Content="Export Minutes..."
+                                Command="{Binding ExportMinutesCommand}"
+                                HorizontalAlignment="Right" Margin="0,0,0,10"/>
+                        <TextBox Text="{Binding MinutesMarkdown, Mode=OneWay}" IsReadOnly="True"
+                                 TextWrapping="Wrap" AcceptsReturn="True" Classes="mono"
+                                 Background="{DynamicResource App.SurfaceSunken}" BorderThickness="0"/>
+                    </DockPanel>
+                </Border>
+            </TabItem>
+
+            <TabItem Header="Settings">
+                <ScrollViewer Margin="0,10,0,0" VerticalScrollBarVisibility="Auto">
+                    <!-- No MaxWidth/HorizontalAlignment here - cards stretch to the full tab
+                         width, matching Live Transcript and Minutes (both plain full-width Borders). -->
+                    <StackPanel Spacing="12">
+
+                        <Border Classes="card">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="h2" Text="MODELS"/>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Classes="field-label" Text="Live model (Stage 1 - during the meeting)"/>
+                                    <ComboBox ItemsSource="{Binding ModelOptions}" SelectedItem="{Binding SelectedLiveModel}"
+                                              HorizontalAlignment="Stretch"/>
+                                </StackPanel>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Classes="field-label" Text="Final model (Stage 2 - accurate pass after Stop)"/>
+                                    <ComboBox ItemsSource="{Binding ModelOptions}" SelectedItem="{Binding SelectedFinalModel}"
+                                              HorizontalAlignment="Stretch"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Classes="card">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="h2" Text="LANGUAGE"/>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Classes="field-label"
+                                               Text="Language override (2-letter code, e.g. en / ja / zh - blank = auto-detect)"/>
+                                    <TextBox Text="{Binding LanguageOverrideText}"/>
+                                </StackPanel>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Classes="field-label"
+                                               Text="Allowed languages for auto-detect (comma-separated 2-letter codes, e.g. ja,en,zh,pl,fr - blank = no restriction)"/>
+                                    <TextBox Text="{Binding AllowedLanguagesText}"/>
+                                </StackPanel>
+                                <CheckBox Content="Live translation to English (Stage 1 only - a second whisper.cpp decode of each line, offline, no other target language)"
+                                          IsChecked="{Binding LiveTranslationEnabled}"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Classes="card">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="h2" Text="OUTPUT FOLDER"/>
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Right" Classes="toolbar" Content="Browse..."
+                                            Command="{Binding BrowseOutputFolderCommand}" Margin="8,0,0,0"/>
+                                    <TextBox Text="{Binding OutputRoot}"/>
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Classes="card">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="h2" Text="MINUTES GENERATION"/>
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Classes="field-label" Text="Provider"/>
+                                    <ComboBox ItemsSource="{Binding MinutesProviderOptions}"
+                                              SelectedItem="{Binding SelectedMinutesProviderOption}"
+                                              HorizontalAlignment="Stretch">
+                                        <ComboBox.Styles>
+                                            <Style Selector="ComboBoxItem">
+                                                <Setter Property="IsEnabled" Value="{Binding IsAvailable}"/>
+                                                <Setter Property="ToolTip.Tip" Value="{Binding Reason}"/>
+                                            </Style>
+                                        </ComboBox.Styles>
+                                    </ComboBox>
+                                </StackPanel>
+
+                                <Border Classes="subsection">
+                                    <ItemsControl ItemsSource="{Binding MinutesProviderOptions}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="vm:MinutesProviderOption">
+                                                <StackPanel Spacing="2" Margin="0,2">
+                                                    <TextBlock Text="{Binding Summary}" Classes="caption"
+                                                               TextWrapping="Wrap"/>
+                                                    <!-- Not found: show the exact install command as selectable/copyable
+                                                         text, same commands installer\backends.iss offers at install
+                                                         time - this is where the gap actually surfaces for a user who
+                                                         skipped the optional backends step (or never saw it). IsReadOnly
+                                                         TextBox (not TextBlock) so the text can be selected and copied,
+                                                         matching the read-only-selectable pattern already used for
+                                                         MinutesMarkdown above. -->
+                                                    <TextBox Text="{Binding InstallCommand, Mode=OneWay}" IsReadOnly="True"
+                                                             Classes="mono" FontSize="11" Padding="4"
+                                                             IsVisible="{Binding ShowInstallCommand, Converter={StaticResource BoolToVisibleConverter}}"
+                                                             Background="{DynamicResource App.SurfaceSunken}" BorderThickness="0"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Border>
+
+                                <Button Classes="toolbar-small" Content="Recheck Availability"
+                                        Command="{Binding RecheckAvailabilityCommand}"
+                                        HorizontalAlignment="Left"/>
+
+                                <Border Classes="subsection"
+                                        IsVisible="{Binding IsOllamaProviderSelected, Converter={StaticResource BoolToVisibleConverter}}">
+                                    <StackPanel Spacing="8">
+                                        <TextBlock Text="Runs fully locally - no subscription needed. On a CPU-only machine (no CUDA GPU), a small local model will be noticeably worse than Claude/Codex on mixed Japanese/Mandarin/English/Polish/French transcripts."
+                                                   TextWrapping="Wrap" FontStyle="Italic" Foreground="{DynamicResource App.Busy}"/>
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Classes="field-label" Text="Ollama server URL"/>
+                                            <TextBox Text="{Binding OllamaBaseUrl}"/>
+                                        </StackPanel>
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Classes="field-label" Text="Model (populated from the server's actual model list)"/>
+                                            <DockPanel>
+                                                <Button DockPanel.Dock="Right" Classes="toolbar" Content="Refresh Models"
+                                                        Command="{Binding RefreshOllamaModelsCommand}" Margin="8,0,0,0"/>
+                                                <ComboBox ItemsSource="{Binding OllamaModels}" SelectedItem="{Binding SelectedOllamaModel}"
+                                                          HorizontalAlignment="Stretch"/>
+                                            </DockPanel>
+                                        </StackPanel>
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Classes="field-label"
+                                                       Text="Context window (num_ctx, in tokens). A transcript longer than this is silently truncated by Ollama unless set here; the app also warns if the transcript is estimated to exceed it."
+                                                       TextWrapping="Wrap"/>
+                                            <TextBox Text="{Binding OllamaNumCtxText}"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Classes="field-label" Text="Minutes generation timeout, in seconds (increase for a slow local model)"/>
+                                    <TextBox Text="{Binding MinutesTimeoutSecondsText}"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Classes="card">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="h2" Text="MINUTES PROMPT TEMPLATE"/>
+                                <TextBox Text="{Binding MinutesPromptTemplate}"
+                                         TextWrapping="Wrap" AcceptsReturn="True" Classes="mono"
+                                         Height="260"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <!-- ============================================================
+             Status bar: determinate progress for the final pass / minutes
+             generation, plus the persistent status/error line.
+             ============================================================ -->
+        <Border Grid.Row="3" Classes="card" Padding="14,10" Margin="0,12,0,0">
+            <Grid RowDefinitions="Auto,Auto">
+
+                <DockPanel Grid.Row="0" Margin="0,0,0,8"
+                           IsVisible="{Binding IsBusy, Converter={StaticResource BoolToVisibleConverter}}">
+                    <Button DockPanel.Dock="Right" Classes="toolbar-small" Content="Cancel"
+                            Command="{Binding CancelCommand}" Margin="8,0,0,0"/>
+                    <ProgressBar Classes="final-progress" Minimum="0" Maximum="100"
+                                 Value="{Binding ProgressPercent, Mode=OneWay}"
+                                 IsIndeterminate="{Binding IsProgressIndeterminate}"/>
+                </DockPanel>
+
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="16">
+                    <TextBlock Text="{Binding StatusText}" Classes="caption"/>
+                    <TextBlock Text="{Binding ErrorMessage}" Classes="caption"
+                               Foreground="{DynamicResource App.Error}"
+                               IsVisible="{Binding ErrorMessage, Converter={StaticResource NullToVisibleConverter}}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

@@ -1,0 +1,269 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!--
+    Class-based styles built on the tokens in Theme.axaml. Applied on top of FluentTheme
+    (see App.axaml - this file is included after <FluentTheme/>, so equal-or-higher
+    specificity selectors here win). Nothing here changes control behaviour, only how it
+    looks - see MainWindow.axaml for what each class is used on.
+  -->
+
+  <!-- ===================== Typography ===================== -->
+
+  <Style Selector="TextBlock.display">
+    <Setter Property="FontSize" Value="{DynamicResource Type.Display}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextPrimary}"/>
+  </Style>
+
+  <Style Selector="TextBlock.h1">
+    <Setter Property="FontSize" Value="{DynamicResource Type.H1}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextPrimary}"/>
+  </Style>
+
+  <Style Selector="TextBlock.h2">
+    <Setter Property="FontSize" Value="{DynamicResource Type.H2}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="LetterSpacing" Value="0.6"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextSecondary}"/>
+    <Setter Property="Margin" Value="0,0,0,10"/>
+  </Style>
+
+  <Style Selector="TextBlock.caption">
+    <Setter Property="FontSize" Value="{DynamicResource Type.Caption}"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextSecondary}"/>
+  </Style>
+
+  <Style Selector="TextBlock.secondary">
+    <Setter Property="Foreground" Value="{DynamicResource App.TextSecondary}"/>
+  </Style>
+
+  <Style Selector="TextBlock.field-label">
+    <Setter Property="FontSize" Value="{DynamicResource Type.Caption}"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextSecondary}"/>
+    <Setter Property="Margin" Value="0,0,0,3"/>
+  </Style>
+
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}"/>
+    <Setter Property="FontSize" Value="{DynamicResource Type.Mono}"/>
+  </Style>
+
+  <Style Selector="TextBox.mono">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}"/>
+    <Setter Property="FontSize" Value="{DynamicResource Type.Mono}"/>
+  </Style>
+
+  <!-- ===================== Cards / sections ===================== -->
+
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource App.Surface}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.Border}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.L}"/>
+    <Setter Property="Padding" Value="16"/>
+    <Setter Property="BoxShadow" Value="{DynamicResource App.CardShadow}"/>
+  </Style>
+
+  <Style Selector="Border.subsection">
+    <Setter Property="Background" Value="{DynamicResource App.SurfaceAlt}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.Border}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.M}"/>
+    <Setter Property="Padding" Value="12"/>
+  </Style>
+
+  <!-- ===================== Header ===================== -->
+
+  <Style Selector="TextBox.title-input">
+    <Setter Property="FontSize" Value="{DynamicResource Type.H1}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Padding" Value="10,6"/>
+    <Setter Property="Background" Value="{DynamicResource App.SurfaceAlt}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.Border}"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.M}"/>
+  </Style>
+
+  <Style Selector="TextBlock.elapsed">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}"/>
+    <Setter Property="FontSize" Value="24"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextPrimary}"/>
+    <Setter Property="HorizontalAlignment" Value="Center"/>
+  </Style>
+
+  <!-- Status pill: a small coloured dot + status text. Colour/tint state is driven purely by
+       Classes bound directly to MainViewModel bools (Classes.recording/.busy/.hasError) -
+       no extra view-model properties needed. Precedence (declared low -> high specificity
+       equal, so later wins when combined): idle < busy < recording < hasError. -->
+  <Style Selector="Border.status-pill">
+    <Setter Property="Background" Value="{DynamicResource App.SurfaceAlt}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.Border}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}"/>
+    <Setter Property="Padding" Value="10,5"/>
+  </Style>
+  <Style Selector="Border.status-pill.busy">
+    <Setter Property="Background" Value="{DynamicResource App.BusySoft}"/>
+  </Style>
+  <Style Selector="Border.status-pill.recording">
+    <Setter Property="Background" Value="{DynamicResource App.RecordingSoft}"/>
+  </Style>
+  <Style Selector="Border.status-pill.hasError">
+    <Setter Property="Background" Value="{DynamicResource App.ErrorSoft}"/>
+  </Style>
+
+  <Style Selector="Border.status-pill Ellipse.status-dot">
+    <Setter Property="Fill" Value="{DynamicResource App.Idle}"/>
+  </Style>
+  <Style Selector="Border.status-pill.busy Ellipse.status-dot">
+    <Setter Property="Fill" Value="{DynamicResource App.Busy}"/>
+  </Style>
+  <Style Selector="Border.status-pill.recording Ellipse.status-dot">
+    <Setter Property="Fill" Value="{DynamicResource App.Recording}"/>
+  </Style>
+  <Style Selector="Border.status-pill.hasError Ellipse.status-dot">
+    <Setter Property="Fill" Value="{DynamicResource App.Error}"/>
+  </Style>
+
+  <Style Selector="Border.status-pill TextBlock.status-text">
+    <Setter Property="FontSize" Value="{DynamicResource Type.Caption}"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextSecondary}"/>
+  </Style>
+  <Style Selector="Border.status-pill.recording TextBlock.status-text">
+    <Setter Property="Foreground" Value="{DynamicResource App.Recording}"/>
+  </Style>
+  <Style Selector="Border.status-pill.hasError TextBlock.status-text">
+    <Setter Property="Foreground" Value="{DynamicResource App.Error}"/>
+  </Style>
+
+  <!-- ===================== Buttons ===================== -->
+
+  <Style Selector="Button.start-action">
+    <Setter Property="Background" Value="{DynamicResource App.Success}"/>
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Padding" Value="26,12"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.M}"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+  <Style Selector="Button.start-action:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource App.Success}"/>
+    <Setter Property="Opacity" Value="0.9"/>
+  </Style>
+
+  <Style Selector="Button.stop-action">
+    <Setter Property="Background" Value="{DynamicResource App.Recording}"/>
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Padding" Value="26,12"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.M}"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+  <Style Selector="Button.stop-action:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource App.Recording}"/>
+    <Setter Property="Opacity" Value="0.9"/>
+  </Style>
+
+  <Style Selector="Button.toolbar">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.BorderStrong}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextPrimary}"/>
+    <Setter Property="Padding" Value="12,6"/>
+    <Setter Property="FontSize" Value="{DynamicResource Type.Body}"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.S}"/>
+  </Style>
+
+  <Style Selector="Button.toolbar-small">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.BorderStrong}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.TextPrimary}"/>
+    <Setter Property="Padding" Value="9,4"/>
+    <Setter Property="FontSize" Value="{DynamicResource Type.Caption}"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.S}"/>
+  </Style>
+
+  <Style Selector="Button.accent-action">
+    <Setter Property="Background" Value="{DynamicResource App.Accent}"/>
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="14,6"/>
+    <Setter Property="FontSize" Value="{DynamicResource Type.Body}"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.S}"/>
+  </Style>
+
+  <!-- ===================== Level meters ===================== -->
+
+  <Style Selector="ProgressBar.level-meter">
+    <Setter Property="Height" Value="6"/>
+    <Setter Property="Minimum" Value="0"/>
+    <Setter Property="Maximum" Value="1"/>
+    <Setter Property="CornerRadius" Value="3"/>
+    <Setter Property="Background" Value="{DynamicResource App.MeterTrack}"/>
+  </Style>
+
+  <Style Selector="ProgressBar.final-progress">
+    <Setter Property="Height" Value="8"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Background" Value="{DynamicResource App.MeterTrack}"/>
+    <Setter Property="Foreground" Value="{DynamicResource App.Accent}"/>
+  </Style>
+
+  <!-- ===================== Transcript badges / list ===================== -->
+
+  <Style Selector="Border.source-badge">
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.S}"/>
+    <Setter Property="Padding" Value="7,2"/>
+    <Setter Property="VerticalAlignment" Value="Top"/>
+  </Style>
+  <Style Selector="Border.source-badge TextBlock">
+    <Setter Property="Foreground" Value="White"/>
+    <Setter Property="FontSize" Value="{DynamicResource Type.Caption}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+  </Style>
+
+  <Style Selector="ListBox.transcript">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+  <Style Selector="ListBox.transcript ListBoxItem">
+    <Setter Property="Padding" Value="10,7"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.S}"/>
+    <Setter Property="Background" Value="Transparent"/>
+  </Style>
+  <Style Selector="ListBox.transcript ListBoxItem:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource App.SurfaceAlt}"/>
+  </Style>
+  <Style Selector="ListBox.transcript ListBoxItem:selected /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent"/>
+  </Style>
+  <Style Selector="ListBox.transcript ListBoxItem:selected:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource App.SurfaceAlt}"/>
+  </Style>
+
+  <!-- ===================== Compact device summary bar (shown while recording) ===================== -->
+
+  <Style Selector="Border.device-compact">
+    <Setter Property="Background" Value="{DynamicResource App.SurfaceAlt}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource App.Border}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.M}"/>
+    <Setter Property="Padding" Value="14,8"/>
+  </Style>
+
+  <!-- ===================== Tabs ===================== -->
+
+  <Style Selector="TabItem">
+    <Setter Property="FontSize" Value="{DynamicResource Type.Body}"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Padding" Value="14,8"/>
+  </Style>
+
+</Styles>

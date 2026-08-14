@@ -1,0 +1,89 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!--
+      Multi-targeted on purpose: net10.0-windows is the TFM that actually ships today
+      (Windows is the only platform verified end-to-end - device capture, real
+      transcription, the installer). Plain net10.0 is what makes the eventual macOS
+      build possible per PI's requirement, and is compiled here too - not just claimed -
+      so the IAudioPlatform seam is proven to actually satisfy a non-Windows build, via
+      the MeetingScribe.Audio.Mac stub, on every build of this solution.
+    -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>MeetingScribe.App</AssemblyName>
+    <RootNamespace>MeetingScribe.App</RootNamespace>
+    <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
+    <!-- UTF-8 everywhere is a hard project requirement (the box default codepage is
+         cp950); pin the executable's default encodings so Console/File writes that
+         don't specify an encoding explicitly still come out UTF-8, not cp950. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Classic reflection-based bindings, not compiled bindings - this port keeps the
+         WPF-era {Binding Path} style throughout (no x:DataType needed on every view). -->
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <!--
+    Multi-targeted on Windows only. net10.0-windows is the TFM that actually ships
+    today (Windows is the only platform verified end-to-end - device capture, real
+    transcription, the installer). On a non-Windows build host, net10.0-windows cannot
+    be added: NAudio (pulled in transitively by MeetingScribe.Audio.Windows) depends on
+    NAudio.WinForms, which requires the Microsoft.WindowsDesktop.App.WindowsForms
+    FrameworkReference - a Windows-only targeting pack that does not exist on macOS/
+    Linux SDKs, workload or no workload. So on non-Windows hosts this project builds
+    only plain net10.0, wired to MeetingScribe.Audio.Mac - still a real, compiled proof
+    that the IAudioPlatform seam holds on a non-Windows target, just without also
+    forcing an impossible net10.0-windows leg on this host.
+  -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <TargetFrameworks>net10.0-windows;net10.0</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(OS)' != 'Windows_NT'">
+    <TargetFrameworks>net10.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <!-- Reference BindingMode/ImmutableSolidColorBrush etc. via the Diagnostics
+         package only in Debug so release builds/publishes stay smaller. -->
+    <PackageReference Include="Avalonia.Diagnostics" Version="12.1.1" Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingScribe.Audio.Abstractions\MeetingScribe.Audio.Abstractions.csproj" />
+    <ProjectReference Include="..\MeetingScribe.Whisper\MeetingScribe.Whisper.csproj" />
+  </ItemGroup>
+
+  <!-- App icon lives in the repo-level assets/ folder (shared master, see
+       assets/icon.svg) rather than duplicated under this project. Linked in as
+       an AvaloniaResource so MainWindow.axaml can reference it via
+       avares://MeetingScribe.App/Assets/icon.ico for the title-bar/Alt-Tab icon,
+       independently of the ApplicationIcon PE-resource embedding above (that
+       one only fires for the net10.0-windows exe icon; this one is what
+       Avalonia's cross-platform Window.Icon actually reads at runtime). -->
+  <ItemGroup>
+    <AvaloniaResource Include="..\assets\icon.ico" Link="Assets\icon.ico" />
+  </ItemGroup>
+
+  <!-- Platform audio provider: exactly one is wired in per TFM. This is the seam from
+       Part 1 actually being exercised at build time, not just documented. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <ProjectReference Include="..\MeetingScribe.Audio.Windows\MeetingScribe.Audio.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
+    <ProjectReference Include="..\MeetingScribe.Audio.Mac\MeetingScribe.Audio.Mac.csproj" />
+  </ItemGroup>
+
+  <!-- Bootstrap/AudioPlatformProvider.*.cs picks which IAudioPlatform to construct;
+       only the file matching the active TFM is compiled in. -->
+  <ItemGroup>
+    <Compile Remove="Bootstrap\AudioPlatformProvider.Windows.cs" Condition="'$(TargetFramework)' != 'net10.0-windows'" />
+    <Compile Remove="Bootstrap\AudioPlatformProvider.Other.cs" Condition="'$(TargetFramework)' == 'net10.0-windows'" />
+  </ItemGroup>
+
+</Project>

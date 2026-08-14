@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    Cross-platform tool, one real IAudioPlatform per host OS - not multi-targeted (this
+    is a dev/verification tool, not a shipped bi-platform deliverable), just OS-
+    conditioned like MeetingScribe.Audio.Windows.csproj: net10.0-windows + NAudio-backed
+    WindowsAudioPlatform on Windows, plain net10.0 + MacAudioPlatform everywhere else.
+    Reads WAV files back with a hand-rolled parser (WavAnalyzer.cs) instead of NAudio's
+    WaveFileReader so the analysis step works identically on both platforms without
+    adding a Windows-only package reference to a project that must build on macOS.
+  -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(OS)' != 'Windows_NT'">
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingScribe.Audio.Abstractions\MeetingScribe.Audio.Abstractions.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <ProjectReference Include="..\MeetingScribe.Audio.Windows\MeetingScribe.Audio.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OS)' != 'Windows_NT'">
+    <ProjectReference Include="..\MeetingScribe.Audio.Mac\MeetingScribe.Audio.Mac.csproj" />
+  </ItemGroup>
+
+  <!-- AudioPlatformProvider.*.cs picks which IAudioPlatform to construct; only the
+       file matching the host OS is compiled in. -->
+  <ItemGroup>
+    <Compile Remove="AudioPlatformProvider.Windows.cs" Condition="'$(OS)' != 'Windows_NT'" />
+    <Compile Remove="AudioPlatformProvider.Other.cs" Condition="'$(OS)' == 'Windows_NT'" />
+  </ItemGroup>
+
+</Project>
