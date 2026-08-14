@@ -199,6 +199,126 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+// Install-phase audit log -- Inno's own /LOG captures Setup's own actions,
+// NOT this file's Pascal-level decisions (which backend was selected, the
+// exact command line run, the raw exit code, paths probed, verification
+// result). Without this there is zero artifact on a user's machine to
+// diagnose a silent-looking backend-install failure from. Written to the
+// same %LocalAppData%\MeetingScribeCS\logs\ directory Program.cs (the app
+// itself) already uses for crash.log, so "check your logs folder" finds
+// both in one place.
+//
+// Declared this early (right after Detection, before everything else that
+// calls it -- Wizard page, PATH functions, per-backend installers,
+// orchestration) because Pascal Script requires a function be declared
+// before its first call site within the compiled unit.
+// ---------------------------------------------------------------------------
+
+var
+  BackendsLogPathCache: String;
+
+function BackendsLogFilePath: String;
+begin
+  if BackendsLogPathCache = '' then
+    BackendsLogPathCache := ExpandConstant('{localappdata}\MeetingScribeCS\logs\backends-install.log');
+  Result := BackendsLogPathCache;
+end;
+
+function BackendsResultFilePath: String;
+begin
+  Result := ExpandConstant('{localappdata}\MeetingScribeCS\logs\backends-install-result.txt');
+end;
+
+function BoolStr(const B: Boolean): String;
+begin
+  if B then
+    Result := 'True'
+  else
+    Result := 'False';
+end;
+
+function BoolTo01(const B: Boolean): String;
+begin
+  if B then
+    Result := '1'
+  else
+    Result := '0';
+end;
+
+// Never raises and never aborts the calling install step on a logging
+// failure (e.g. logs\ not writable) -- ForceDirectories/SaveStringToFile
+// both return Boolean rather than raising, so a lost log line is silently
+// tolerated by design: the backend install itself must never fail because
+// logging failed, same rationale as Program.cs's own LogCrash catch blocks.
+procedure BackendsLog(const Line: String);
+var
+  LogFile, Stamped: String;
+begin
+  LogFile := BackendsLogFilePath;
+  if not ForceDirectories(ExtractFileDir(LogFile)) then
+    Exit;
+  Stamped := '[' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + '] ' + Line;
+  SaveStringToFile(LogFile, Stamped + #13#10, True);
+end;
+
+// Strips characters that would break the sidecar's '|'-delimited format out
+// of a Detail string before it's written -- every Detail here is built by
+// this script from literal text plus paths/exit codes, none of which are
+// expected to contain '|' or newlines, but a value we didn't fully control
+// (e.g. captured stdout in ResolveNpmPrefixDir) could in principle.
+function BackendsSanitizeField(const S: String): String;
+var
+  R: String;
+begin
+  R := S;
+  StringChangeEx(R, '|', ';', True);
+  StringChangeEx(R, #13#10, ' ', True);
+  StringChangeEx(R, #13, ' ', True);
+  StringChangeEx(R, #10, ' ', True);
+  Result := R;
+end;
+
+// Machine-readable sidecar, overwritten every run, so MeetingScribe.App
+// itself (Settings tab) can tell "never tried to install this" apart from
+// "the installer tried and failed" -- a live PATH probe alone only ever
+// sees "missing right now", it can't distinguish those two cases. Kept
+// separate from backends-install.log (append-only, human-readable, every
+// run ever) rather than parsing that: fixed 4-field '|'-delimited format
+// is trivial and robust to parse from C#, a growing timestamped log is not.
+procedure BackendsWriteResultLine(const F: TStringList; const Name: String; const R: TBackendResult);
+begin
+  F.Add(Name + '|' + BoolTo01(R.Attempted) + '|' + BoolTo01(R.Succeeded) + '|' + BackendsSanitizeField(R.Detail));
+end;
+
+procedure BackendsWriteResultFile;
+var
+  F: TStringList;
+  ResultPath: String;
+begin
+  ResultPath := BackendsResultFilePath;
+  if not ForceDirectories(ExtractFileDir(ResultPath)) then
+  begin
+    BackendsLog('WARN: could not create ' + ExtractFileDir(ResultPath) + ' -- result sidecar not written.');
+    Exit;
+  end;
+
+  F := TStringList.Create;
+  try
+    F.Add('# MeetingScribe backend install result -- machine-readable, overwritten every run. Do not hand-edit.');
+    F.Add('timestamp|' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':'));
+    BackendsWriteResultLine(F, 'claude', ClaudeResult);
+    BackendsWriteResultLine(F, 'codex', CodexResult);
+    BackendsWriteResultLine(F, 'ollama', OllamaResult);
+    if SaveStringToFile(ResultPath, F.Text, False) then
+      BackendsLog('Result sidecar written: ' + ResultPath)
+    else
+      BackendsLog('WARN: SaveStringToFile failed for ' + ResultPath);
+  finally
+    F.Free;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
 // Wizard page
 // ---------------------------------------------------------------------------
 
@@ -512,12 +632,61 @@ begin
   end;
 end;
 
+// Updates THIS process's (Setup.exe's) own environment block, not just the
+// registry. RegWriteExpandStringValue above only affects FUTURE processes
+// that re-read HKCU\Environment; this running process's own env block is a
+// snapshot taken before any of these writes and is NOT live-refreshed by
+// BroadcastEnvironmentChange (that broadcast only prompts other top-level
+// windows, e.g. Explorer, to pick up the change for whatever THEY launch
+// next -- it does nothing for this process or its children).
+//
+// Two consequences if this is skipped: (1) any Exec() this script makes for
+// the rest of THIS run still can't find a backend it just installed on
+// PATH (worked around ad hoc for Node/npm in InstallNodeIfNeeded via a
+// directory scan, before this function existed); and (2) far more visibly,
+// Inno's own [Run] "Launch MeetingScribe" entry -- which fires when the
+// user clicks Finish, i.e. strictly after this whole install including
+// this call has completed -- spawns MeetingScribe.App.exe as a child of
+// THIS process with no explicit environment override, so CreateProcess
+// gives it a verbatim copy of this process's (still-stale) env block. A
+// user who checks "Install Claude" then immediately launches MeetingScribe
+// from the Finish page would see Settings report Claude "not found on
+// PATH" -- true for that inherited env block, but indistinguishable to the
+// user from the install having silently failed, when it actually
+// succeeded. SetEnvironmentVariableW updates the calling process's
+// (Setup.exe's) own block; any child process spawned afterward via
+// CreateProcess with no explicit environment -- which is what both this
+// script's own Exec() calls and Inno's [Run] launch use -- inherits the
+// updated copy.
+function SetEnvironmentVariableW(lpName, lpValue: String): Boolean;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+procedure RefreshOwnProcessPathEnv(const Dir: String);
+var
+  CurrentPath, NewPath: String;
+begin
+  CurrentPath := GetEnv('PATH');
+  if PathListContainsDir(CurrentPath, Dir) then
+    Exit; // already present in this process's own env -- nothing to do
+  if CurrentPath = '' then
+    NewPath := Dir
+  else
+    NewPath := CurrentPath + ';' + Dir;
+  if SetEnvironmentVariableW('PATH', NewPath) then
+    BackendsLog('PATH: refreshed this process''s own env so ' + Dir + ' is visible to it and to anything it launches next (e.g. the post-install "Launch MeetingScribe" entry).')
+  else
+    BackendsLog('WARN: SetEnvironmentVariableW failed to refresh this process''s own PATH after adding ' + Dir + ' -- a "Launch MeetingScribe" right after this install may still show the backend as not found until the app is restarted.');
+end;
+
 // Convenience wrappers against the real HKCU\Environment\Path.
 function AppendUserPathDir(const Dir: String): Boolean;
 begin
   Result := AppendDirToPathValue(HKCU, 'Environment', 'Path', Dir);
   if Result then
+  begin
     BroadcastEnvironmentChange;
+    RefreshOwnProcessPathEnv(Dir);
+  end;
 end;
 
 function RemoveUserPathDir(const Dir: String): Boolean;
@@ -775,38 +944,45 @@ end;
 
 function InstallClaude: TBackendResult;
 var
-  PsExe: String;
+  PsExe, CmdLine: String;
   ResultCode: Integer;
   Dir: String;
 begin
   Result.Attempted := True;
   Result.PathDirAdded := '';
+  BackendsLog('Claude: install started.');
 
   PsExe := ResolvePowerShellExe;
   if PsExe = '' then
   begin
     Result.Succeeded := False;
     Result.Detail := 'PowerShell not found -- cannot run the Claude installer.';
+    BackendsLog('Claude: ' + Result.Detail);
     Exit;
   end;
 
-  if not Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  CmdLine := '-NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"';
+  BackendsLog('Claude: command: "' + PsExe + '" ' + CmdLine);
+  if not Exec(PsExe, CmdLine, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     Result.Succeeded := False;
     Result.Detail := 'Failed to launch the Claude installer (PowerShell could not be started).';
+    BackendsLog('Claude: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Claude: process exited, raw exit code ' + IntToStr(ResultCode) + '.');
   if ResultCode <> 0 then
   begin
     Result.Succeeded := False;
     Result.Detail := 'Claude installer exited with code ' + IntToStr(ResultCode) + '.';
+    BackendsLog('Claude: ' + Result.Detail);
     Exit;
   end;
 
   // Verified per requirement: lands in %USERPROFILE%\.local\bin.
   Dir := ExpandConstant('{%USERPROFILE}\.local\bin');
+  BackendsLog('Claude: probing ' + Dir + '\claude.exe -> found=' + BoolStr(FileExists(Dir + '\claude.exe')));
   if FileExists(Dir + '\claude.exe') then
   begin
     if AppendUserPathDir(Dir) then
@@ -820,6 +996,7 @@ begin
     Result.Succeeded := False;
     Result.Detail := 'Installer exited 0 but claude.exe was not found at the expected location (' + Dir + ').';
   end;
+  BackendsLog('Claude: ' + Result.Detail);
 end;
 
 function InstallNodeIfNeeded: TBackendResult;
@@ -829,11 +1006,13 @@ var
 begin
   Result.Attempted := True;
   Result.PathDirAdded := '';
+  BackendsLog('Node: prerequisite check started (needed by Codex).');
 
   if NodeFound and NpmFound then
   begin
     Result.Succeeded := True;
     Result.Detail := 'Node.js/npm already present (' + NpmPath + ') -- nothing to install.';
+    BackendsLog('Node: ' + Result.Detail);
     Exit;
   end;
 
@@ -842,20 +1021,25 @@ begin
   begin
     Result.Succeeded := False;
     Result.Detail := 'winget.exe not found (checked %LOCALAPPDATA%\Microsoft\WindowsApps and PATH) -- cannot install Node.js.';
+    BackendsLog('Node: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Node: command: "' + WingetExe + '" ' + RemoveWingetCmdPrefix(NodeInstallCmd));
   if not Exec(WingetExe, RemoveWingetCmdPrefix(NodeInstallCmd), '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     Result.Succeeded := False;
     Result.Detail := 'Failed to launch winget for Node.js install.';
+    BackendsLog('Node: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Node: winget process exited, raw exit code ' + IntToStr(ResultCode) + '.');
   if ResultCode <> 0 then
   begin
     Result.Succeeded := False;
     Result.Detail := 'winget install of Node.js LTS exited with code ' + IntToStr(ResultCode) + '.';
+    BackendsLog('Node: ' + Result.Detail);
     Exit;
   end;
 
@@ -890,6 +1074,7 @@ begin
     Result.Detail := 'Installed Node.js LTS (per-user, no admin) via winget; npm at ' + NpmPath + '.'
   else
     Result.Detail := 'winget reported success but node/npm could not be located afterward.';
+  BackendsLog('Node: ' + Result.Detail);
 end;
 
 function InstallCodex: TBackendResult;
@@ -900,6 +1085,7 @@ var
 begin
   Result.Attempted := True;
   Result.PathDirAdded := '';
+  BackendsLog('Codex: install started.');
 
   NodeStep := InstallNodeIfNeeded;
   NodeResult := NodeStep;
@@ -907,28 +1093,35 @@ begin
   begin
     Result.Succeeded := False;
     Result.Detail := 'Skipped -- Node.js/npm prerequisite failed: ' + NodeStep.Detail;
+    BackendsLog('Codex: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Codex: command: "' + NpmPath + '" install -g @openai/codex');
   if not RunShim(NpmPath, 'install -g @openai/codex', ResultCode) then
   begin
     Result.Succeeded := False;
     Result.Detail := 'Failed to launch npm.';
+    BackendsLog('Codex: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Codex: npm process exited, raw exit code ' + IntToStr(ResultCode) + '.');
   if ResultCode <> 0 then
   begin
     Result.Succeeded := False;
     Result.Detail := 'npm install -g @openai/codex exited with code ' + IntToStr(ResultCode) + '.';
+    BackendsLog('Codex: ' + Result.Detail);
     Exit;
   end;
 
   Dir := ResolveNpmPrefixDir(NpmPath);
+  BackendsLog('Codex: resolved npm global prefix -> "' + Dir + '"');
   if Dir = '' then
   begin
     Result.Succeeded := False;
     Result.Detail := 'npm exited 0 but its global prefix could not be determined afterward.';
+    BackendsLog('Codex: ' + Result.Detail);
     Exit;
   end;
 
@@ -937,6 +1130,7 @@ begin
   Result.PathDirAdded := Dir;
   Result.Succeeded := True;
   Result.Detail := 'Installed via npm; global bin dir ' + Dir + '.';
+  BackendsLog('Codex: ' + Result.Detail);
 end;
 
 function InstallOllama: TBackendResult;
@@ -947,26 +1141,32 @@ var
 begin
   Result.Attempted := True;
   Result.PathDirAdded := '';
+  BackendsLog('Ollama: install started.');
 
   WingetExe := ResolveWingetExe;
   if WingetExe = '' then
   begin
     Result.Succeeded := False;
     Result.Detail := 'winget.exe not found (checked %LOCALAPPDATA%\Microsoft\WindowsApps and PATH) -- cannot install Ollama.';
+    BackendsLog('Ollama: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Ollama: command: "' + WingetExe + '" ' + RemoveWingetCmdPrefix(OllamaInstallCmdDisplay));
   if not Exec(WingetExe, RemoveWingetCmdPrefix(OllamaInstallCmdDisplay), '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     Result.Succeeded := False;
     Result.Detail := 'Failed to launch winget for Ollama install.';
+    BackendsLog('Ollama: ' + Result.Detail);
     Exit;
   end;
 
+  BackendsLog('Ollama: winget process exited, raw exit code ' + IntToStr(ResultCode) + '.');
   if ResultCode <> 0 then
   begin
     Result.Succeeded := False;
     Result.Detail := 'winget install of Ollama exited with code ' + IntToStr(ResultCode) + '.';
+    BackendsLog('Ollama: ' + Result.Detail);
     Exit;
   end;
 
@@ -976,10 +1176,12 @@ begin
   else
     Dir := ExtractFilePath(ResolvedOllama);
 
+  BackendsLog('Ollama: probing ' + Dir + 'ollama.exe -> found=' + BoolStr(FileExists(AddBackslash(Dir) + 'ollama.exe')));
   if not FileExists(AddBackslash(Dir) + 'ollama.exe') then
   begin
     Result.Succeeded := False;
     Result.Detail := 'winget reported success but ollama.exe was not found afterward (checked ' + Dir + ').';
+    BackendsLog('Ollama: ' + Result.Detail);
     Exit;
   end;
 
@@ -988,6 +1190,7 @@ begin
   Result.PathDirAdded := Dir;
   Result.Succeeded := True;
   Result.Detail := 'Installed to ' + Dir + '.';
+  BackendsLog('Ollama: ' + Result.Detail);
 end;
 
 // ---------------------------------------------------------------------------
@@ -1008,7 +1211,13 @@ end;
 procedure RunBackendInstalls;
 var
   Summary: TStringList;
+  AttemptedCount, FailedCount: Integer;
 begin
+  BackendsLog('=== Backend install run started -- log file: ' + BackendsLogFilePath + ' ===');
+  BackendsLog('Claude: selected=' + BoolStr(ClaudeCheck.Checked) + ' enabled=' + BoolStr(ClaudeCheck.Enabled));
+  BackendsLog('Codex: selected=' + BoolStr(CodexCheck.Checked) + ' enabled=' + BoolStr(CodexCheck.Enabled));
+  BackendsLog('Ollama: selected=' + BoolStr(OllamaCheck.Checked) + ' enabled=' + BoolStr(OllamaCheck.Enabled));
+
   ClaudeResult.Attempted := False;
   CodexResult.Attempted := False;
   OllamaResult.Attempted := False;
@@ -1022,10 +1231,43 @@ begin
   if OllamaCheck.Checked and OllamaCheck.Enabled then
     OllamaResult := InstallOllama;
 
+  // Counted separately from the per-backend Detail text below so the
+  // results page can lead with an impossible-to-miss "N of M failed" line
+  // rather than requiring the user to read three lines and notice one says
+  // FAILED -- a user who only glances at the page (or whose window is
+  // small) should still see that something needs attention.
+  AttemptedCount := 0;
+  FailedCount := 0;
+  if ClaudeResult.Attempted then
+  begin
+    AttemptedCount := AttemptedCount + 1;
+    if not ClaudeResult.Succeeded then
+      FailedCount := FailedCount + 1;
+  end;
+  if CodexResult.Attempted then
+  begin
+    AttemptedCount := AttemptedCount + 1;
+    if not CodexResult.Succeeded then
+      FailedCount := FailedCount + 1;
+  end;
+  if OllamaResult.Attempted then
+  begin
+    AttemptedCount := AttemptedCount + 1;
+    if not OllamaResult.Succeeded then
+      FailedCount := FailedCount + 1;
+  end;
+
   Summary := TStringList.Create;
   try
     Summary.Add('MINUTES BACKENDS');
     Summary.Add('');
+    if FailedCount > 0 then
+    begin
+      Summary.Add('*** ' + IntToStr(FailedCount) + ' of ' + IntToStr(AttemptedCount) +
+        ' selected backend install(s) FAILED -- see the FAILED line(s) below, and the full log at:');
+      Summary.Add('    ' + BackendsLogFilePath);
+      Summary.Add('');
+    end;
     Summary.Add(FormatBackendLine('Claude', ClaudeResult));
     Summary.Add(FormatBackendLine('Codex', CodexResult));
     Summary.Add(FormatBackendLine('Ollama', OllamaResult));
@@ -1039,10 +1281,17 @@ begin
     Summary.Add('');
     Summary.Add('Installed zero backends? MeetingScribe still transcribes locally and free. Install a ' +
       'backend later, by hand, any time -- MeetingScribe detects it with no reinstall needed.');
+    Summary.Add('');
+    Summary.Add('Full install log: ' + BackendsLogFilePath);
 
     BackendsSummaryText := Summary.Text;
     BackendsResultsPage.RichEditViewer.Lines.Text := BackendsSummaryText;
+    BackendsLog('--- Results page summary text follows ---');
+    BackendsLog(BackendsSummaryText);
+    BackendsLog('--- end summary ---');
   finally
     Summary.Free;
   end;
+
+  BackendsWriteResultFile;
 end;

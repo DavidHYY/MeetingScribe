@@ -1055,13 +1055,49 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
         {
             var availability = await provider.CheckAvailabilityAsync().ConfigureAwait(true);
             option.IsAvailable = availability.IsAvailable;
-            option.Reason = availability.Reason;
+            option.Reason = availability.IsAvailable
+                ? availability.Reason
+                : EnrichWithInstallOutcome(option.Kind, availability.Reason);
         }
         catch (Exception ex) when (ex is MinutesGenerationException or InvalidOperationException)
         {
             option.IsAvailable = false;
             option.Reason = $"Availability check failed: {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// A live "not found on PATH" is ambiguous - the user may never have tried to install this
+    /// backend, or the MeetingScribe installer may have tried and failed (or succeeded but this
+    /// process's own PATH is stale, see backends.iss's RefreshOwnProcessPathEnv comment). Reads
+    /// the installer's last-run sidecar (<see cref="BackendInstallResultReader"/>) to tell those
+    /// apart and append a concrete reason instead of leaving the user to guess. A missing sidecar
+    /// (installer never ran the backends step, or this is a hand-install) leaves the live reason
+    /// untouched.
+    /// </summary>
+    private static string EnrichWithInstallOutcome(MinutesProviderKind kind, string liveReason)
+    {
+        var key = kind switch
+        {
+            MinutesProviderKind.Claude => "claude",
+            MinutesProviderKind.Codex => "codex",
+            MinutesProviderKind.Ollama => "ollama",
+            _ => null,
+        };
+        if (key is null)
+        {
+            return liveReason;
+        }
+
+        var outcome = BackendInstallResultReader.TryRead(key);
+        return outcome switch
+        {
+            { Attempted: true, Succeeded: false } failed =>
+                $"{liveReason} The MeetingScribe installer tried to install this and failed: {failed.Detail}",
+            { Attempted: true, Succeeded: true } =>
+                $"{liveReason} The MeetingScribe installer reported this installed successfully - if you just ran the installer, restart MeetingScribe (or sign out/in) to pick up the updated PATH.",
+            _ => liveReason,
+        };
     }
 
     /// <summary>
@@ -1079,7 +1115,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
             option.IsAvailable = false;
             option.Reason = reachability.IsAvailable
                 ? $"{reachability.Reason} No model selected - click Refresh Models."
-                : reachability.Reason;
+                : EnrichWithInstallOutcome(MinutesProviderKind.Ollama, reachability.Reason);
             return;
         }
 
