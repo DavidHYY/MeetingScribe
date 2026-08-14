@@ -55,10 +55,27 @@
 
 type
   TBackendResult = record
-    Attempted: Boolean;   // False = skipped (already installed, or unchecked)
+    Attempted: Boolean;      // True = the checkbox was Checked and Enabled, so
+                              // RunBackendInstalls called this backend's
+                              // Install* function. NOT the same as "the
+                              // backend's own installer process ran" -- see
+                              // CouldNotAttempt.
     Succeeded: Boolean;
-    Detail: String;       // human-readable outcome, always set when Attempted
-    PathDirAdded: String; // dir this run added to PATH, '' if none
+    CouldNotAttempt: Boolean; // True = Attempted, but a required prerequisite
+                              // (PowerShell / winget / npm+Node) was missing
+                              // or itself could not be launched, so the
+                              // backend's OWN installer command never ran --
+                              // e.g. Codex selected but npm unavailable. This
+                              // is distinct from Succeeded=False on its own,
+                              // which means the backend's own installer DID
+                              // run (or a post-run verification step ran) and
+                              // that is what failed. Meaningless when
+                              // Attempted=False.
+    Detail: String;          // human-readable outcome, always set when Attempted
+    PathDirAdded: String;    // dir this run actually added to PATH (i.e.
+                              // AppendUserPathDir returned True); '' if no PATH
+                              // change was made, including when the dir was
+                              // already present -- check Detail for that case.
   end;
 
 var
@@ -428,6 +445,23 @@ end;
 
 // Reflect current checkbox state (installed backends forced-checked and
 // disabled) and current detection results into the page's controls.
+//
+// FORCE-CHECK ON DISABLE, READ CAREFULLY: when a backend is already found,
+// the line below sets Checked := True even though the USER never touched
+// this box. That is a display choice ONLY -- "show this as done" -- made
+// purely so the box reads as ticked at a glance next to its "Installed: ..."
+// status label. It is NOT user consent and RunBackendInstalls never treats
+// it as one: the actual install gate everywhere in this file is `Checked AND
+// Enabled`, and Enabled is False in exactly this branch, so a force-checked
+// box is never (re)installed. The trap this comment exists to prevent: do
+// NOT read Checked alone anywhere as "the user asked for this" -- for a
+// disabled box it means the opposite, "the installer decided this was
+// already present." A detection bug that wrongly concludes a backend is
+// installed produces exactly this state (Checked=True, Enabled=False) with
+// nothing actually installed and nothing attempted -- this is the literal
+// shape of the 2026-08-14 incident that motivated splitting the results
+// summary into distinct branches instead of one "skipped" line covering both
+// "not selected" and "already installed".
 procedure RefreshBackendsPageUi;
 begin
   if ClaudeFound then
@@ -949,6 +983,7 @@ var
   Dir: String;
 begin
   Result.Attempted := True;
+  Result.CouldNotAttempt := False;
   Result.PathDirAdded := '';
   BackendsLog('Claude: install started.');
 
@@ -956,6 +991,7 @@ begin
   if PsExe = '' then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // prerequisite (PowerShell) missing -- the Claude installer itself never ran
     Result.Detail := 'PowerShell not found -- cannot run the Claude installer.';
     BackendsLog('Claude: ' + Result.Detail);
     Exit;
@@ -966,6 +1002,7 @@ begin
   if not Exec(PsExe, CmdLine, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // CreateProcess itself failed -- no Claude installer process ever existed, so there is no exit code to report
     Result.Detail := 'Failed to launch the Claude installer (PowerShell could not be started).';
     BackendsLog('Claude: ' + Result.Detail);
     Exit;
@@ -985,11 +1022,15 @@ begin
   BackendsLog('Claude: probing ' + Dir + '\claude.exe -> found=' + BoolStr(FileExists(Dir + '\claude.exe')));
   if FileExists(Dir + '\claude.exe') then
   begin
-    if AppendUserPathDir(Dir) then
-      RecordPathDirAdded(Dir);
-    Result.PathDirAdded := Dir;
     Result.Succeeded := True;
-    Result.Detail := 'Installed claude.exe to ' + Dir + '.';
+    if AppendUserPathDir(Dir) then
+    begin
+      RecordPathDirAdded(Dir);
+      Result.PathDirAdded := Dir;
+      Result.Detail := 'Installed claude.exe to ' + Dir + '; added to PATH.';
+    end
+    else
+      Result.Detail := 'Installed claude.exe to ' + Dir + '; already on PATH, no change made.';
   end
   else
   begin
@@ -1005,6 +1046,7 @@ var
   ResultCode: Integer;
 begin
   Result.Attempted := True;
+  Result.CouldNotAttempt := False;
   Result.PathDirAdded := '';
   BackendsLog('Node: prerequisite check started (needed by Codex).');
 
@@ -1020,6 +1062,7 @@ begin
   if WingetExe = '' then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // prerequisite (winget) missing -- the Node install itself never ran
     Result.Detail := 'winget.exe not found (checked %LOCALAPPDATA%\Microsoft\WindowsApps and PATH) -- cannot install Node.js.';
     BackendsLog('Node: ' + Result.Detail);
     Exit;
@@ -1029,6 +1072,7 @@ begin
   if not Exec(WingetExe, RemoveWingetCmdPrefix(NodeInstallCmd), '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // CreateProcess itself failed -- no winget process ever existed, so there is no exit code to report
     Result.Detail := 'Failed to launch winget for Node.js install.';
     BackendsLog('Node: ' + Result.Detail);
     Exit;
@@ -1084,6 +1128,7 @@ var
   Dir: String;
 begin
   Result.Attempted := True;
+  Result.CouldNotAttempt := False;
   Result.PathDirAdded := '';
   BackendsLog('Codex: install started.');
 
@@ -1091,8 +1136,15 @@ begin
   NodeResult := NodeStep;
   if not NodeStep.Succeeded then
   begin
+    // Node/npm is a hard prerequisite for `npm install -g` -- whatever went
+    // wrong with it (missing winget, winget itself failing, or npm/node not
+    // resolvable afterward), Codex's OWN installer (npm) never ran. This is
+    // the "could not attempt" branch, not a failure of the Codex install
+    // itself -- distinguish it so "npm unavailable" isn't reported the same
+    // way as "npm ran and exited non-zero".
     Result.Succeeded := False;
-    Result.Detail := 'Skipped -- Node.js/npm prerequisite failed: ' + NodeStep.Detail;
+    Result.CouldNotAttempt := True;
+    Result.Detail := 'Node.js/npm prerequisite unavailable: ' + NodeStep.Detail;
     BackendsLog('Codex: ' + Result.Detail);
     Exit;
   end;
@@ -1101,6 +1153,7 @@ begin
   if not RunShim(NpmPath, 'install -g @openai/codex', ResultCode) then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // CreateProcess itself failed -- npm never ran, so there is no exit code to report
     Result.Detail := 'Failed to launch npm.';
     BackendsLog('Codex: ' + Result.Detail);
     Exit;
@@ -1125,11 +1178,15 @@ begin
     Exit;
   end;
 
-  if AppendUserPathDir(Dir) then
-    RecordPathDirAdded(Dir);
-  Result.PathDirAdded := Dir;
   Result.Succeeded := True;
-  Result.Detail := 'Installed via npm; global bin dir ' + Dir + '.';
+  if AppendUserPathDir(Dir) then
+  begin
+    RecordPathDirAdded(Dir);
+    Result.PathDirAdded := Dir;
+    Result.Detail := 'Installed via npm; global bin dir ' + Dir + '; added to PATH.';
+  end
+  else
+    Result.Detail := 'Installed via npm; global bin dir ' + Dir + '; already on PATH, no change made.';
   BackendsLog('Codex: ' + Result.Detail);
 end;
 
@@ -1140,6 +1197,7 @@ var
   Dir, ResolvedOllama: String;
 begin
   Result.Attempted := True;
+  Result.CouldNotAttempt := False;
   Result.PathDirAdded := '';
   BackendsLog('Ollama: install started.');
 
@@ -1147,6 +1205,7 @@ begin
   if WingetExe = '' then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // prerequisite (winget) missing -- the Ollama installer itself never ran
     Result.Detail := 'winget.exe not found (checked %LOCALAPPDATA%\Microsoft\WindowsApps and PATH) -- cannot install Ollama.';
     BackendsLog('Ollama: ' + Result.Detail);
     Exit;
@@ -1156,6 +1215,7 @@ begin
   if not Exec(WingetExe, RemoveWingetCmdPrefix(OllamaInstallCmdDisplay), '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     Result.Succeeded := False;
+    Result.CouldNotAttempt := True; // CreateProcess itself failed -- no winget process ever existed, so there is no exit code to report
     Result.Detail := 'Failed to launch winget for Ollama install.';
     BackendsLog('Ollama: ' + Result.Detail);
     Exit;
@@ -1185,11 +1245,15 @@ begin
     Exit;
   end;
 
-  if AppendUserPathDir(Dir) then
-    RecordPathDirAdded(Dir);
-  Result.PathDirAdded := Dir;
   Result.Succeeded := True;
-  Result.Detail := 'Installed to ' + Dir + '.';
+  if AppendUserPathDir(Dir) then
+  begin
+    RecordPathDirAdded(Dir);
+    Result.PathDirAdded := Dir;
+    Result.Detail := 'Installed to ' + Dir + '; added to PATH.';
+  end
+  else
+    Result.Detail := 'Installed to ' + Dir + '; already on PATH, no change made.';
   BackendsLog('Ollama: ' + Result.Detail);
 end;
 
@@ -1198,12 +1262,54 @@ end;
 // CurStep = ssPostInstall.
 // ---------------------------------------------------------------------------
 
-function FormatBackendLine(const Name: String; const R: TBackendResult): String;
+// Builds ONE unambiguous line per backend. Five distinct outcomes, never
+// collapsed into one "skipped" line -- that collapse (selected=True
+// enabled=False showing as "skipped (not selected, or already installed)")
+// is the defect this function replaces (2026-08-14):
+//   1. not selected      -- Checked=False. Normal, supported, not a problem.
+//   2. already installed -- Checked=True, Enabled=False (see the force-check
+//      comment on RefreshBackendsPageUi). States the resolved path so a
+//      wrong detection is visible on sight.
+//   3. installed          -- Checked=True, Enabled=True, R.Succeeded=True.
+//   4. FAILED             -- attempted, the backend's own installer (or a
+//      post-run verification step) ran and that is what failed. R.Detail
+//      already carries the exit code when a process actually exited
+//      non-zero (see the Install* functions).
+//   5. could not attempt  -- attempted, but a required prerequisite
+//      (PowerShell / winget / npm+Node) was missing or itself failed to
+//      launch, so the backend's OWN installer command never ran. Distinct
+//      from case 4: there was nothing to fail because nothing ran.
+function FormatBackendLine(const Name: String; const Checked, Enabled: Boolean; const FoundPath: String; const R: TBackendResult): String;
 begin
+  if not Checked then
+  begin
+    Result := Name + ': not selected -- left unchecked, not attempted.';
+    Exit;
+  end;
+
+  if not Enabled then
+  begin
+    // Checked=True here is the force-check display state, NOT a user
+    // choice -- see RefreshBackendsPageUi. Name the resolved path so a false
+    // "already installed" detection is caught by looking, not by guessing.
+    Result := Name + ': already installed -- found at ' + FoundPath + '.';
+    Exit;
+  end;
+
+  // Checked and Enabled: a genuine user selection. RunBackendInstalls below
+  // always calls the matching Install* for exactly this combination, so
+  // R.Attempted should always be True here -- if it somehow is not, say so
+  // loudly instead of silently reprinting a blank/ambiguous line.
   if not R.Attempted then
-    Result := Name + ': skipped (not selected, or already installed).'
-  else if R.Succeeded then
-    Result := Name + ': OK -- ' + R.Detail
+  begin
+    Result := Name + ': INTERNAL ERROR -- selected but never attempted (wiring bug in RunBackendInstalls).';
+    Exit;
+  end;
+
+  if R.Succeeded then
+    Result := Name + ': installed -- ' + R.Detail
+  else if R.CouldNotAttempt then
+    Result := Name + ': could not attempt -- ' + R.Detail
   else
     Result := Name + ': FAILED -- ' + R.Detail;
 end;
@@ -1211,7 +1317,8 @@ end;
 procedure RunBackendInstalls;
 var
   Summary: TStringList;
-  AttemptedCount, FailedCount: Integer;
+  ClaudeLine, CodexLine, OllamaLine: String;
+  SelectedCount, ProblemCount: Integer;
 begin
   BackendsLog('=== Backend install run started -- log file: ' + BackendsLogFilePath + ' ===');
   BackendsLog('Claude: selected=' + BoolStr(ClaudeCheck.Checked) + ' enabled=' + BoolStr(ClaudeCheck.Enabled));
@@ -1219,8 +1326,11 @@ begin
   BackendsLog('Ollama: selected=' + BoolStr(OllamaCheck.Checked) + ' enabled=' + BoolStr(OllamaCheck.Enabled));
 
   ClaudeResult.Attempted := False;
+  ClaudeResult.CouldNotAttempt := False;
   CodexResult.Attempted := False;
+  CodexResult.CouldNotAttempt := False;
   OllamaResult.Attempted := False;
+  OllamaResult.CouldNotAttempt := False;
 
   if ClaudeCheck.Checked and ClaudeCheck.Enabled then
     ClaudeResult := InstallClaude;
@@ -1231,48 +1341,61 @@ begin
   if OllamaCheck.Checked and OllamaCheck.Enabled then
     OllamaResult := InstallOllama;
 
-  // Counted separately from the per-backend Detail text below so the
-  // results page can lead with an impossible-to-miss "N of M failed" line
-  // rather than requiring the user to read three lines and notice one says
-  // FAILED -- a user who only glances at the page (or whose window is
-  // small) should still see that something needs attention.
-  AttemptedCount := 0;
-  FailedCount := 0;
+  // One line per backend, unambiguous per FormatBackendLine above. Logged
+  // (so the log records which of the five branches was taken and why, same
+  // as the on-screen summary) AND added to the results page.
+  ClaudeLine := FormatBackendLine('Claude', ClaudeCheck.Checked, ClaudeCheck.Enabled, ClaudePath, ClaudeResult);
+  CodexLine := FormatBackendLine('Codex', CodexCheck.Checked, CodexCheck.Enabled, CodexPath, CodexResult);
+  OllamaLine := FormatBackendLine('Ollama', OllamaCheck.Checked, OllamaCheck.Enabled, OllamaPath, OllamaResult);
+  BackendsLog(ClaudeLine);
+  BackendsLog(CodexLine);
+  BackendsLog(OllamaLine);
+
+  // SelectedCount/ProblemCount cover only the genuine-selection branches
+  // (Checked and Enabled) -- "not selected" and "already installed" are not
+  // problems and are excluded from this count. A CouldNotAttempt result
+  // counts as a problem alongside a FAILED one: both mean the user selected
+  // a backend and it is not present, even though the reason differs (see
+  // FormatBackendLine) -- the banner below exists to catch a user's eye
+  // regardless of which of the two applies, the per-backend line spells out
+  // which one it actually was.
+  SelectedCount := 0;
+  ProblemCount := 0;
   if ClaudeResult.Attempted then
   begin
-    AttemptedCount := AttemptedCount + 1;
+    SelectedCount := SelectedCount + 1;
     if not ClaudeResult.Succeeded then
-      FailedCount := FailedCount + 1;
+      ProblemCount := ProblemCount + 1;
   end;
   if CodexResult.Attempted then
   begin
-    AttemptedCount := AttemptedCount + 1;
+    SelectedCount := SelectedCount + 1;
     if not CodexResult.Succeeded then
-      FailedCount := FailedCount + 1;
+      ProblemCount := ProblemCount + 1;
   end;
   if OllamaResult.Attempted then
   begin
-    AttemptedCount := AttemptedCount + 1;
+    SelectedCount := SelectedCount + 1;
     if not OllamaResult.Succeeded then
-      FailedCount := FailedCount + 1;
+      ProblemCount := ProblemCount + 1;
   end;
 
   Summary := TStringList.Create;
   try
     Summary.Add('MINUTES BACKENDS');
     Summary.Add('');
-    if FailedCount > 0 then
+    if ProblemCount > 0 then
     begin
-      Summary.Add('*** ' + IntToStr(FailedCount) + ' of ' + IntToStr(AttemptedCount) +
-        ' selected backend install(s) FAILED -- see the FAILED line(s) below, and the full log at:');
+      Summary.Add('*** ' + IntToStr(ProblemCount) + ' of ' + IntToStr(SelectedCount) +
+        ' selected backend install(s) did not complete -- see the FAILED / could not attempt line(s) below, and the full log at:');
       Summary.Add('    ' + BackendsLogFilePath);
       Summary.Add('');
     end;
-    Summary.Add(FormatBackendLine('Claude', ClaudeResult));
-    Summary.Add(FormatBackendLine('Codex', CodexResult));
-    Summary.Add(FormatBackendLine('Ollama', OllamaResult));
+    Summary.Add(ClaudeLine);
+    Summary.Add(CodexLine);
+    Summary.Add(OllamaLine);
     Summary.Add('');
-    Summary.Add('A failed backend install does NOT affect MeetingScribe -- it is installed and will run.');
+    Summary.Add('A failed or not-attempted backend install does NOT affect MeetingScribe -- it is installed and will run.');
     Summary.Add('');
     if (ClaudeResult.Attempted and ClaudeResult.Succeeded) then
       Summary.Add('Claude: run "claude" once in a terminal to log in before minutes generation will work.');

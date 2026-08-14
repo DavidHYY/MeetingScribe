@@ -21,6 +21,6 @@
     FileVersion property in any individual .csproj.
   -->
   <PropertyGroup>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
   </PropertyGroup>
 </Project>
