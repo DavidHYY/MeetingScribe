@@ -36,6 +36,30 @@ public sealed record StartRequest(
     string OllamaModel,
     int OllamaNumCtx);
 
+/// <summary>
+/// Everything needed to transcribe a recording the user already has (a phone/voice-recorder/
+/// meeting-tool export) instead of one captured live via <see cref="StartRequest"/>/
+/// <see cref="MeetingSessionController.StopAsync"/>. Deliberately narrower than
+/// <see cref="StartRequest"/>: there is no live (stage 1) pass for an imported file (nothing is
+/// being recorded to run one against) and no Mic/System split (one file, one track), so this
+/// carries only what <see cref="MeetingSessionController.ImportAsync"/> actually uses - the
+/// accurate-pass model/language settings and the minutes settings.
+/// </summary>
+public sealed record ImportRequest(
+    string Title,
+    string OutputRoot,
+    string SourceFilePath,
+    WhisperModelSize FinalModelSize,
+    string ModelCacheDirectory,
+    string? LanguageOverride,
+    string? AllowedLanguages,
+    string MinutesPromptTemplate,
+    int MinutesTimeoutSeconds,
+    MinutesProviderKind MinutesProvider,
+    string OllamaBaseUrl,
+    string OllamaModel,
+    int OllamaNumCtx);
+
 /// <summary>Raised once the whole session (recording + stage 2 + stage 3) has finished, successfully or not.</summary>
 public sealed class MeetingCompletedEventArgs(
     string meetingFolder,
@@ -175,6 +199,163 @@ public sealed class MeetingSessionController : IAsyncDisposable
             // the live model (loaded after Stop already decided there was nothing to
             // dispose). Exceptions are caught inside and reported, never left unobserved.
             _liveInitTask = InitializeLiveEngineAsync(request, cancellationToken);
+        }
+        finally
+        {
+            lock (_stateLock)
+            {
+                IsBusy = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Transcribes an existing recording exactly as a live meeting's Stop path does from the
+    /// accurate pass onward: one <see cref="WhisperTranscriber.TranscribeFileAsync"/> call
+    /// against the file's own audio (no live/stage-1 pass - there is nothing being recorded to
+    /// run one against), then the same transcript.txt/vtt/json + minutes.md outputs in a freshly
+    /// created meeting folder, so the Minutes tab and export work exactly as they do for a
+    /// recorded meeting. Mutually exclusive with a live recording, same
+    /// IsRecording/IsBusy guard as <see cref="StartAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// WAV input goes straight to <see cref="WhisperTranscriber.TranscribeFileAsync"/> (it already
+    /// reads WAV natively via <c>WavAudioLoader</c>). Anything else is decoded first via
+    /// <see cref="_audioPlatform"/>'s <see cref="IAudioPlatform.DecodeAudioFileToWavAsync"/> -
+    /// Windows Media Foundation on Windows, an honest <see cref="PlatformNotSupportedException"/>
+    /// on macOS (see <c>MacAudioPlatform</c>).
+    /// </remarks>
+    public async Task ImportAsync(ImportRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        lock (_stateLock)
+        {
+            if (IsRecording || IsBusy)
+            {
+                throw new InvalidOperationException("A meeting session is already active.");
+            }
+
+            IsBusy = true;
+        }
+
+        var startedUtc = DateTime.UtcNow;
+
+        try
+        {
+            if (!File.Exists(request.SourceFilePath))
+            {
+                throw new FileNotFoundException($"Recording file not found: {request.SourceFilePath}", request.SourceFilePath);
+            }
+
+            var sourceInfo = new FileInfo(request.SourceFilePath);
+            if (sourceInfo.Length == 0)
+            {
+                throw new InvalidDataException($"'{sourceInfo.Name}' is empty (0 bytes) - nothing to transcribe.");
+            }
+
+            var meetingFolder = MeetingPathPlanner.BuildMeetingFolder(request.OutputRoot, request.Title, DateTime.Now);
+            Directory.CreateDirectory(meetingFolder);
+            CurrentMeetingFolder = meetingFolder;
+
+            var isWav = string.Equals(Path.GetExtension(sourceInfo.Name), ".wav", StringComparison.OrdinalIgnoreCase);
+
+            StatusChanged?.Invoke(this, isWav ? $"Opening {sourceInfo.Name}..." : $"Decoding {sourceInfo.Name}...");
+
+            IReadOnlyList<TranscriptLine> finalTranscript = [];
+            BackendInfo? finalBackend = null;
+
+            var audioStream = isWav
+                ? new FileStream(request.SourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1 << 20, useAsync: true)
+                : await _audioPlatform.DecodeAudioFileToWavAsync(request.SourceFilePath, cancellationToken).ConfigureAwait(false);
+
+            await using (audioStream.ConfigureAwait(false))
+            {
+                StatusChanged?.Invoke(this, "Loading accurate model...");
+
+                var finalOptions = new WhisperTranscriberOptions
+                {
+                    ModelSize = request.FinalModelSize,
+                    ModelCacheDirectory = request.ModelCacheDirectory,
+                    LanguageOverride = request.LanguageOverride,
+                    AllowedLanguages = ParseAllowedLanguages(request.AllowedLanguages),
+                };
+
+                await using var finalTranscriber = await WhisperTranscriber.CreateAsync(finalOptions, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                finalBackend = finalTranscriber.Backend;
+
+                // TranscribeFileAsync reports 0-100% per chunk (~15-25s of audio each - see its
+                // own remarks) regardless of total file length, so even a multi-hour recording
+                // keeps moving visibly instead of appearing to hang; it is not pre-scanned for
+                // duration up front, since the only way to learn that is the same WAV parse
+                // TranscribeFileAsync already does internally, and duplicating it here would just
+                // load the whole file twice for a number that would be stale within seconds
+                // anyway.
+                var progress = new Progress<int>(p =>
+                {
+                    var status = $"Transcribing {sourceInfo.Name}... {p}%";
+                    StatusChanged?.Invoke(this, status);
+                    FinalProgressChanged?.Invoke(this, new FinalProgress(status, p));
+                });
+
+                var result = await finalTranscriber.TranscribeFileAsync(audioStream, progress, cancellationToken)
+                    .ConfigureAwait(false);
+
+                finalTranscript = result.Segments
+                    .Where(s => s.Text.Trim().Length > 0)
+                    .Select(s => new TranscriptLine(
+                        AudioSourceKind.Microphone, // placeholder, never shown - see SourceLabelOverride below
+                        s.Start,
+                        s.End,
+                        s.Text.Trim(),
+                        s.Language,
+                        s.Probability)
+                    {
+                        SourceLabelOverride = "Recording",
+                    })
+                    .ToList();
+
+                if (finalTranscript.Count > 0)
+                {
+                    TranscriptWriter.WriteTxt(Path.Combine(meetingFolder, "transcript.txt"), finalTranscript);
+                    TranscriptWriter.WriteVtt(Path.Combine(meetingFolder, "transcript.vtt"), finalTranscript);
+                    TranscriptWriter.WriteJson(Path.Combine(meetingFolder, "transcript.json"), finalTranscript);
+                }
+                else
+                {
+                    StatusChanged?.Invoke(this, "No speech detected in the recording.");
+                }
+            }
+
+            string? minutesMarkdown = null;
+            string? minutesError = "No transcript to generate minutes from.";
+
+            if (finalTranscript.Count > 0)
+            {
+                (minutesMarkdown, minutesError) = await GenerateMinutesAsync(
+                    finalTranscript,
+                    request.MinutesProvider,
+                    request.OllamaBaseUrl,
+                    request.OllamaModel,
+                    request.OllamaNumCtx,
+                    request.MinutesPromptTemplate,
+                    request.MinutesTimeoutSeconds,
+                    request.Title,
+                    startedUtc,
+                    meetingFolder,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            await WriteImportMetaAsync(
+                meetingFolder, request, sourceInfo.FullName, startedUtc, DateTime.UtcNow, finalBackend,
+                minutesMarkdown is not null, minutesError, cancellationToken).ConfigureAwait(false);
+
+            Completed?.Invoke(this, new MeetingCompletedEventArgs(meetingFolder, finalTranscript, minutesMarkdown, minutesError));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Failed?.Invoke(this, ex.Message);
         }
         finally
         {
@@ -376,38 +557,18 @@ public sealed class MeetingSessionController : IAsyncDisposable
 
             if (finalTranscript.Count > 0)
             {
-                var provider = CreateMinutesProvider(request);
-                StatusChanged?.Invoke(this, $"Generating minutes via {provider.DisplayName}...");
-                try
-                {
-                    var transcriptText = TranscriptWriter.ToPlainText(finalTranscript);
-                    var minutesProgress = new Progress<TimeSpan>(elapsed =>
-                        MinutesProgressChanged?.Invoke(this, new MinutesProgress(provider.DisplayName, elapsed)));
-
-                    minutesMarkdown = await provider
-                        .GenerateAsync(
-                            transcriptText,
-                            request.MinutesPromptTemplate,
-                            request.Title,
-                            startedUtc.ToLocalTime().ToString("yyyy-MM-dd"),
-                            TimeSpan.FromSeconds(request.MinutesTimeoutSeconds),
-                            minutesProgress,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-
-                    await File.WriteAllTextAsync(
-                        Path.Combine(meetingFolder, "minutes.md"),
-                        minutesMarkdown,
-                        new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-                        cancellationToken).ConfigureAwait(false);
-
-                    StatusChanged?.Invoke(this, "Minutes ready.");
-                }
-                catch (MinutesGenerationException ex)
-                {
-                    minutesError = ex.Message;
-                    StatusChanged?.Invoke(this, $"Minutes generation failed: {ex.Message}");
-                }
+                (minutesMarkdown, minutesError) = await GenerateMinutesAsync(
+                    finalTranscript,
+                    request.MinutesProvider,
+                    request.OllamaBaseUrl,
+                    request.OllamaModel,
+                    request.OllamaNumCtx,
+                    request.MinutesPromptTemplate,
+                    request.MinutesTimeoutSeconds,
+                    request.Title,
+                    startedUtc,
+                    meetingFolder,
+                    cancellationToken).ConfigureAwait(false);
             }
             else
             {
@@ -474,6 +635,102 @@ public sealed class MeetingSessionController : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary><see cref="WriteMetaAsync"/>'s counterpart for <see cref="ImportAsync"/> - same
+    /// meta.json shape, populated from an <see cref="ImportRequest"/> instead of a
+    /// <see cref="StartRequest"/> (no mic/system devices, no live model - see
+    /// <see cref="MeetingMetadata.Imported"/>).</summary>
+    private static async Task WriteImportMetaAsync(
+        string meetingFolder,
+        ImportRequest request,
+        string sourceFilePath,
+        DateTime startedUtc,
+        DateTime stoppedUtc,
+        BackendInfo? finalBackend,
+        bool minutesGenerated,
+        string? minutesError,
+        CancellationToken cancellationToken)
+    {
+        var meta = new MeetingMetadata
+        {
+            Title = request.Title,
+            StartedUtc = startedUtc,
+            StoppedUtc = stoppedUtc,
+            Duration = stoppedUtc - startedUtc,
+            MicrophoneEnabled = false,
+            SystemAudioEnabled = false,
+            Imported = true,
+            ImportedSourceFile = sourceFilePath,
+            LiveModel = "N/A (imported recording - no live pass)",
+            FinalModel = request.FinalModelSize.ToString(),
+            LanguageOverride = request.LanguageOverride,
+            FinalTranscriptionBackend = finalBackend?.LoadedLibrary,
+            FinalTranscriptionIsGpu = finalBackend?.IsGpuBackend,
+            MinutesGenerated = minutesGenerated,
+            MinutesError = minutesError,
+        };
+
+        var json = JsonSerializer.Serialize(meta, MetaJsonOptions);
+        await File.WriteAllTextAsync(
+            Path.Combine(meetingFolder, "meta.json"),
+            json,
+            new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stage 3 (minutes) shared between <see cref="StopAsync"/> (a live-recorded meeting) and
+    /// <see cref="ImportAsync"/> (an imported recording) - identical prompt/timeout/progress
+    /// handling either way, since minutes generation itself does not know or care where the
+    /// transcript it is fed came from.
+    /// </summary>
+    private async Task<(string? Markdown, string? Error)> GenerateMinutesAsync(
+        IReadOnlyList<TranscriptLine> finalTranscript,
+        MinutesProviderKind minutesProvider,
+        string ollamaBaseUrl,
+        string ollamaModel,
+        int ollamaNumCtx,
+        string minutesPromptTemplate,
+        int minutesTimeoutSeconds,
+        string title,
+        DateTime startedUtc,
+        string meetingFolder,
+        CancellationToken cancellationToken)
+    {
+        var provider = CreateMinutesProvider(minutesProvider, ollamaBaseUrl, ollamaModel, ollamaNumCtx);
+        StatusChanged?.Invoke(this, $"Generating minutes via {provider.DisplayName}...");
+        try
+        {
+            var transcriptText = TranscriptWriter.ToPlainText(finalTranscript);
+            var minutesProgress = new Progress<TimeSpan>(elapsed =>
+                MinutesProgressChanged?.Invoke(this, new MinutesProgress(provider.DisplayName, elapsed)));
+
+            var minutesMarkdown = await provider
+                .GenerateAsync(
+                    transcriptText,
+                    minutesPromptTemplate,
+                    title,
+                    startedUtc.ToLocalTime().ToString("yyyy-MM-dd"),
+                    TimeSpan.FromSeconds(minutesTimeoutSeconds),
+                    minutesProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(meetingFolder, "minutes.md"),
+                minutesMarkdown,
+                new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                cancellationToken).ConfigureAwait(false);
+
+            StatusChanged?.Invoke(this, "Minutes ready.");
+            return (minutesMarkdown, null);
+        }
+        catch (MinutesGenerationException ex)
+        {
+            StatusChanged?.Invoke(this, $"Minutes generation failed: {ex.Message}");
+            return (null, ex.Message);
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -531,16 +788,19 @@ public sealed class MeetingSessionController : IAsyncDisposable
 
     /// <summary>
     /// Picks the <see cref="IMinutesProvider"/> for this run from the settings snapshot captured
-    /// at Start() time - same pattern as every other per-meeting setting on <see cref="StartRequest"/>
-    /// (model sizes, prompt template, etc.): changing the Settings tab mid-recording never
-    /// affects a meeting already in progress.
+    /// at Start()/ImportAsync() time - same pattern as every other per-meeting setting on
+    /// <see cref="StartRequest"/>/<see cref="ImportRequest"/> (model sizes, prompt template,
+    /// etc.): changing the Settings tab mid-run never affects a meeting already in progress.
+    /// Takes the four minutes-related fields directly (not a whole request) since
+    /// <see cref="StartRequest"/> and <see cref="ImportRequest"/> share no common base type.
     /// </summary>
-    private static IMinutesProvider CreateMinutesProvider(StartRequest request) => request.MinutesProvider switch
+    private static IMinutesProvider CreateMinutesProvider(
+        MinutesProviderKind minutesProvider, string ollamaBaseUrl, string ollamaModel, int ollamaNumCtx) => minutesProvider switch
     {
         MinutesProviderKind.Claude => new ClaudeMinutesProvider(),
         MinutesProviderKind.Codex => new CodexMinutesProvider(),
-        MinutesProviderKind.Ollama => new OllamaMinutesProvider(request.OllamaBaseUrl, request.OllamaModel, request.OllamaNumCtx),
-        _ => throw new NotSupportedException($"Unknown minutes provider '{request.MinutesProvider}'."),
+        MinutesProviderKind.Ollama => new OllamaMinutesProvider(ollamaBaseUrl, ollamaModel, ollamaNumCtx),
+        _ => throw new NotSupportedException($"Unknown minutes provider '{minutesProvider}'."),
     };
 
     /// <summary>

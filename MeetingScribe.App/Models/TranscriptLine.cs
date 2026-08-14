@@ -23,7 +23,18 @@ public sealed record TranscriptLine(
     string? Language,
     float Probability)
 {
-    public string SourceLabel => Source == AudioSourceKind.Microphone ? "Mic" : "System";
+    /// <summary>
+    /// Overrides <see cref="SourceLabel"/>'s Mic/System derivation from <see cref="Source"/>.
+    /// Set only for lines built from an imported single-track recording (see
+    /// <see cref="MeetingScribe.App.Services.MeetingSessionController.ImportAsync"/>), which has
+    /// no Mic/System distinction to preserve - the underlying <see cref="Source"/> value there is
+    /// an arbitrary placeholder (never shown), same optional-property pattern as
+    /// <see cref="Translation"/> below so every existing positional <c>new TranscriptLine(...)</c>
+    /// call site keeps compiling unchanged. Null (the default) for every recorded-meeting line.
+    /// </summary>
+    public string? SourceLabelOverride { get; init; }
+
+    public string SourceLabel => SourceLabelOverride ?? (Source == AudioSourceKind.Microphone ? "Mic" : "System");
 
     /// <summary>
     /// Stable identity for this line within its owning <see cref="MeetingScribe.App.Services.LiveTranscriptionEngine"/>

@@ -19,7 +19,19 @@ public partial class MainWindow : Window
         DataContext = _viewModel;
 
         _viewModel.LiveTranscriptLines.CollectionChanged += OnLiveTranscriptLinesChanged;
+        _viewModel.ExitRequested += OnExitRequested;
         Closing += OnClosing;
+    }
+
+    /// <summary>
+    /// A verified update has been launched and the view model wants the app to exit. Routed
+    /// through <see cref="Close"/> rather than e.g. <c>Environment.Exit</c> so this goes through
+    /// the exact same <see cref="OnClosing"/> confirm/dispose flow as a user-initiated close -
+    /// no separate teardown path to keep in sync.
+    /// </summary>
+    private void OnExitRequested(object? sender, EventArgs e)
+    {
+        Dispatcher.UIThread.Post(Close, DispatcherPriority.Background);
     }
 
     private void OnLiveTranscriptLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)

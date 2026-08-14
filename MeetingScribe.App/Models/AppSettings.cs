@@ -140,4 +140,16 @@ public sealed class AppSettings
     public string? SystemAudioDeviceId { get; set; }
 
     public string LastMeetingTitle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Default on. When on, the app makes one silent GitHub Releases API call shortly after
+    /// startup to check for a newer version - see <see cref="MeetingScribe.App.Services.Update.UpdateChecker"/>.
+    /// This is the only network call the app makes on its own; it sends nothing but a version
+    /// request (no transcript/audio/telemetry). A failure or "no update" result is silent either
+    /// way - only an explicit "Check for Updates" click in Settings surfaces the outcome. When an
+    /// update IS found and its release carries a verifiable installer (SHA256SUMS.txt sidecar),
+    /// the app downloads it, verifies the hash, launches it, and exits - it never replaces its own
+    /// files in place.
+    /// </summary>
+    public bool CheckForUpdatesOnStartup { get; set; } = true;
 }

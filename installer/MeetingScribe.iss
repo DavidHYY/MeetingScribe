@@ -16,7 +16,17 @@
 ; ============================================================================
 
 #define MyAppName "MeetingScribe"
-#define MyAppVersion "1.0.0"
+; MyAppVersion's real source of truth is Directory.Build.props at the repo
+; root (also what gets baked into the built assemblies, which the in-app
+; updater reads). build-installer.ps1 parses that file and passes the value
+; here via ISCC's command line (/DMyAppVersion=...), which always wins over
+; a #define. This #ifndef only fires if someone opens this .iss directly in
+; the Inno Setup IDE and compiles it without going through the script --
+; keep it in sync manually for that one fallback case, but the real build
+; path never reads it.
+#ifndef MyAppVersion
+  #define MyAppVersion "1.1.0"
+#endif
 #define MyAppPublisher "David Hao-Yu Yang"
 #define MyAppURL "https://github.com/DavidHYY/MeetingScribe"
 #define MyAppExeName "MeetingScribe.App.exe"

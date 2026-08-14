@@ -11,7 +11,45 @@ generation backends" below).
 and need no AI subscription, no API key, and no network access. The choice of
 minutes backend is where a subscription becomes optional-or-not: pick Ollama
 and the whole app runs offline; pick Claude or Codex and only that last step
-needs their CLI to be installed and authenticated.
+needs their CLI to be installed and authenticated. The one thing the app
+contacts on its own is a startup check for a newer version — no meeting
+content in that request, just a version number, and it can be turned off
+(see "Automatic updates" below).
+
+## Transcribe a recording you already have
+
+A "Transcribe a recording..." button next to Start opens a file picker
+instead of starting a live capture. The file runs through the same accurate
+Whisper pass and the same minutes generation a live meeting does — shared
+code, not a parallel path.
+
+- **Formats.** WAV works everywhere. MP3, M4A, and audio-only MP4 are decoded
+  on Windows via Media Foundation (NAudio's `MediaFoundationReader`), which
+  the project already bootstraps for the live-recording path, so nothing
+  extra ships for this.
+- **Why this doesn't touch the seam this README already documents:**
+  `MeetingScribe.Whisper` stays plain `net10.0` with no NAudio or Windows
+  dependency. Decoding lives behind `IAudioPlatform` in
+  `MeetingScribe.Audio.Windows` and hands Whisper a 16 kHz mono PCM16 WAV, so
+  chunking, per-chunk language switching, and the silent-lead-in skip (see
+  below) all run unmodified.
+- **macOS:** throws `PlatformNotSupportedException` naming the fix (convert
+  to WAV, or import on Windows). WAV import still works on macOS.
+  AVFoundation decoding was not attempted.
+- Imported meetings are marked as such in `meta.json`, and a single-track
+  file labels its transcript lines "Recording" rather than misleadingly
+  "Mic".
+- **Verified:** WAV, M4A, MP3, and audio-only MP4 versions of the same
+  18-second clip produced identical text and timings, Vulkan GPU backend
+  confirmed. Error paths return real messages for missing, empty, and
+  corrupt files.
+- **Not verified, said plainly:** live mic Start/Stop was not re-tested
+  after this change (no microphone in the test environment), and the macOS
+  path was not run (no Mac available). Neither existing code path was
+  modified by this feature.
+
+Practical effect: a phone becomes a capture device. Record a voice memo,
+import the file, get minutes. No server involved.
 
 ## Live English translation
 
@@ -40,9 +78,12 @@ this feature is platform-specific.
 **Accuracy caveat — read this before relying on it.** The live pass uses the
 `base` model, which is fast and rough. The translation step faithfully
 translates whatever `base` produced, so rough transcription becomes rough
-translation. Real examples from a verification run on a Japanese meeting:
-「見てます。」 ("I'm watching") came out as "Thank you.", and a longer Japanese
-sentence became "I'm sorry, but I'm sorry." — unrelated to the source.
+translation. In a verification run on a Japanese meeting, a short sentence
+came out as an unrelated English pleasantry, and a longer sentence collapsed
+into a repeated apology bearing no relation to what was said. This is not
+subtle degradation — it is confident, fluent, wrong output. (Constructed
+illustration of the failure shape, not a transcript excerpt: a phrase meaning
+"I'm watching" rendered as "Thank you.")
 
 Treat the live translation as a **rough gist for following along**, not as a
 record. The accurate transcript is the post-meeting pass (`small` by default),
@@ -374,7 +415,7 @@ every occurrence of 「見てくれてありがとう」 and 「ご視聴あり�
 した」 in the lead-in is gone (2→0 and 1→0). No real content was lost: the
 recurring topic keyword still appears 8 times, the last segment still lands
 at 26:14-26:16
-("さようなら"), the quiet-but-real dialogue at 25:03 is intact, and language
+(a short closing pleasantry), the quiet-but-real dialogue at 25:03 is intact, and language
 stayed `ja`. Realtime factor on this run was 2.52x, not the 2.80x baseline —
 mechanically that's surprising (skipping ~140s of lead-in is *less* whisper.cpp
 work than the baseline run did, so it should be equal or faster), so the drop
@@ -474,7 +515,7 @@ real 26-minute recording used throughout this document, medium model:
 | topic keyword A – root form occurrences (incl. inflected variants) | not measured | 9 | 10 |
 | topic keyword B occurrences (Mandarin word for the same concept) | not measured | **13** | **0** |
 | unrelated control-word occurrences (off-topic sanity check, should stay 0) | 0 | 0 | 0 |
-| last segment | ~00:26:14.600「さようなら。」| 00:26:14.600–00:26:16.600「さようなら。」| 00:26:14.600–00:26:16.600「さようなら。」|
+| last segment | ~00:26:14.600, short closing pleasantry | 00:26:14.600–00:26:16.600, short closing pleasantry | 00:26:14.600–00:26:16.600, short closing pleasantry |
 | dominant language (by segment count) | ja | zh (154 ja / 157 zh / 14 en) | ja |
 | realtime factor | 2.5x–2.8x | 1.94x (2.37x on a second run — see machine-load-variance note above) | 1.17x* |
 | confirmed language switches | n/a (locked) | 8 | 0 |
@@ -620,6 +661,11 @@ one-command `build-installer.ps1` that publishes the app and compiles the
 setup. Build output goes to `dist/`, which is git-ignored: it is generated,
 not source.
 
+`build-installer.ps1` also emits `SHA256SUMS.txt` next to the installer.
+That sidecar is what the in-app updater (see "Automatic updates" below)
+verifies a downloaded installer against, so it needs to be attached to the
+GitHub release alongside the installer, not just built locally.
+
 The installer is **per-user** — it installs to
 `%LocalAppData%\Programs\MeetingScribe`, needs no administrator rights, and
 triggers no UAC prompt. Uninstalling leaves `%LocalAppData%\MeetingScribeCS`
@@ -631,6 +677,47 @@ this project, so Windows SmartScreen will show "Windows protected your PC"
 on first run of a downloaded installer; you have to click More info → Run
 anyway. That is the honest state of it, not something to be talked around —
 if you would rather not, build from source with the instructions above.
+
+## Automatic updates
+
+On startup the app asks the GitHub Releases API for the latest tag and
+compares it against its own assembly version. If there's a newer one, it
+downloads the installer, verifies it, launches it, and exits. The in-place
+upgrade path itself (installer over an existing install) was already
+verified independently of this feature, so the updater's own job is just to
+notice and fetch — verification is what makes that fetch safe to run
+unattended.
+
+**Why verification is mandatory, not optional:** this project's builds are
+not reproducible — identical inputs produce a different SHA-256 on every
+compile, because the PE header embeds a build timestamp. A hash can
+therefore never be committed to the repo as a known-good value; it can only
+come from the actual artifact that was uploaded to a release. That's what
+`SHA256SUMS.txt` is for (see "Packaging" above) — generated at build time,
+attached to the release, checked by the updater against the file it just
+downloaded.
+
+- A hash mismatch is a loud, visible refusal, never a silent skip.
+- A release published without a `SHA256SUMS.txt` sidecar is never run
+  unverified — the app points at the release page instead and lets you
+  install it yourself.
+- Quiet by design otherwise: no network, a DNS failure, GitHub being down,
+  or being rate-limited all resolve to silence on the startup path — no
+  popup, no log spam. Only clicking "Check now" explicitly reports "up to
+  date" or a real error.
+- It will not relaunch the app mid-recording.
+- `CheckForUpdatesOnStartup` is a Settings checkbox, default on.
+
+**Privacy note, stated plainly because it matters:** the central claim of
+this README is that recording and transcription never leave your machine.
+The startup update check is the one network call the app makes on its own —
+it sends nothing but a version number to GitHub's release API, and it can be
+turned off in Settings.
+
+**Version handling.** `Directory.Build.props` at the repo root is the single
+source of the version number. It feeds every assembly, the installer
+filename, Inno Setup's `AppVersion`, and the updater's own runtime version
+comparison — one number, not four places to keep in sync by hand.
 
 ## Application icon
 

@@ -41,8 +41,17 @@
                 </StackPanel>
 
                 <Grid Grid.Column="2" VerticalAlignment="Center">
-                    <Button Classes="start-action" Content="&#9679; Start" Command="{Binding StartCommand}"
-                            IsVisible="{Binding IsRecording, Converter={StaticResource InverseBoolToVisibleConverter}}"/>
+                    <!-- Peer of Start, not buried in Settings: importing a recording is the same
+                         kind of "begin producing a transcript" action Start is, just for audio
+                         that already exists instead of audio captured live - so it lives right
+                         next to Start, sharing its visibility (both hidden while a live meeting
+                         is recording; Stop takes over that slot instead). -->
+                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                IsVisible="{Binding IsRecording, Converter={StaticResource InverseBoolToVisibleConverter}}">
+                        <Button Classes="toolbar" Content="Transcribe a recording..." Command="{Binding ImportRecordingCommand}"
+                                VerticalAlignment="Center"/>
+                        <Button Classes="start-action" Content="&#9679; Start" Command="{Binding StartCommand}"/>
+                    </StackPanel>
                     <Button Classes="stop-action" Content="&#9632; Stop" Command="{Binding StopCommand}"
                             IsVisible="{Binding IsRecording, Converter={StaticResource BoolToVisibleConverter}}"/>
                 </Grid>
@@ -306,6 +315,25 @@
                                 <TextBox Text="{Binding MinutesPromptTemplate}"
                                          TextWrapping="Wrap" AcceptsReturn="True" Classes="mono"
                                          Height="260"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Classes="card">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="h2" Text="UPDATES"/>
+                                <CheckBox Content="Check for updates on startup"
+                                          IsChecked="{Binding CheckForUpdatesOnStartup}"/>
+                                <TextBlock Text="This is the only network call MeetingScribe makes on its own - it sends nothing but a version request to GitHub (no transcript, audio, or other data ever leaves this machine)."
+                                           TextWrapping="Wrap" Classes="caption" FontStyle="Italic"/>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Classes="toolbar-small" Content="Check for Updates"
+                                            Command="{Binding CheckForUpdatesCommand}"/>
+                                    <Button Classes="toolbar-small" Content="Open Release Page"
+                                            Command="{Binding OpenReleasePageCommand}"
+                                            IsVisible="{Binding ShowOpenReleasePage, Converter={StaticResource BoolToVisibleConverter}}"/>
+                                </StackPanel>
+                                <TextBlock Text="{Binding UpdateStatusText}" Classes="caption" TextWrapping="Wrap"
+                                           IsVisible="{Binding UpdateStatusText, Converter={StaticResource NullToVisibleConverter}}"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>

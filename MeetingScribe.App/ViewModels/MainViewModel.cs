@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -9,6 +10,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using MeetingScribe.App.Models;
 using MeetingScribe.App.Services;
+using MeetingScribe.App.Services.Update;
 using MeetingScribe.Audio;
 using MeetingScribe.Whisper;
 
@@ -27,14 +29,19 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly TopLevel _topLevel;
     private readonly Dispatcher _dispatcher;
     private readonly MeetingSessionController _controller = new();
+    private readonly UpdateChecker _updateChecker = new();
     private readonly DispatcherTimer _elapsedTimer;
     private readonly AsyncRelayCommand _startCommand;
     private readonly AsyncRelayCommand _stopCommand;
+    private readonly AsyncRelayCommand _importCommand;
     private readonly RelayCommand _cancelCommand;
+    private readonly AsyncRelayCommand _checkForUpdatesCommand;
+    private readonly RelayCommand _openReleasePageCommand;
 
     private DateTime _recordingStartedLocal;
     private string? _currentMeetingFolder;
     private CancellationTokenSource? _stopCts;
+    private string? _pendingReleaseHtmlUrl;
 
     /// <summary>
     /// <paramref name="topLevel"/> is the owning window, used only for Avalonia's
@@ -65,6 +72,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
             : settings.LastMeetingTitle;
         _lastMicDeviceId = settings.MicrophoneDeviceId;
         _lastSystemDeviceId = settings.SystemAudioDeviceId;
+        _checkForUpdatesOnStartup = settings.CheckForUpdatesOnStartup;
 
         // Install commands mirror installer\backends.iss exactly - same three commands offered by
         // the installer's optional "Minutes backends" page, so a user who skipped that step (or
@@ -106,16 +114,37 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
         _startCommand = new AsyncRelayCommand(StartAsync, CanStart);
         _stopCommand = new AsyncRelayCommand(StopAsync, () => IsRecording && !IsBusy);
+        _importCommand = new AsyncRelayCommand(ImportRecordingAsync, CanImport);
         _cancelCommand = new RelayCommand(() => _stopCts?.Cancel(), () => IsBusy && _stopCts is not null);
         RefreshDevicesCommand = new RelayCommand(RefreshDevices);
         BrowseOutputFolderCommand = new AsyncRelayCommand(BrowseOutputFolderAsync);
         ExportMinutesCommand = new AsyncRelayCommand(ExportMinutesAsync, () => !string.IsNullOrWhiteSpace(MinutesMarkdown));
         RecheckAvailabilityCommand = new AsyncRelayCommand(RefreshProviderAvailabilityAsync);
         RefreshOllamaModelsCommand = new AsyncRelayCommand(RefreshOllamaModelsAsync);
+        _checkForUpdatesCommand = new AsyncRelayCommand(() => CheckForUpdatesAsync(isExplicit: true));
+        _openReleasePageCommand = new RelayCommand(OpenReleasePage);
 
         RefreshDevices();
         _ = RefreshProviderAvailabilityAsync();
+
+        if (_checkForUpdatesOnStartup)
+        {
+            // Fire-and-forget, same pattern as RefreshProviderAvailabilityAsync above.
+            // CheckForUpdatesAsync(isExplicit: false) is the "quiet" path: it never touches
+            // ErrorMessage/UpdateStatusText for a non-actionable outcome (no update, network
+            // failure, rate limit, missing sidecar) - only an actual verified update (which then
+            // downloads, verifies, launches, and exits) or a failed hash check (never silent) is
+            // visible from a startup-triggered check.
+            _ = CheckForUpdatesAsync(isExplicit: false);
+        }
     }
+
+    /// <summary>
+    /// Raised when a verified update is ready to install and the app should exit the same way a
+    /// normal window close does (<c>MainWindow</c> subscribes and calls <c>Close()</c>, reusing
+    /// its existing <c>OnClosing</c> confirm/dispose flow rather than duplicating it here).
+    /// </summary>
+    public event EventHandler? ExitRequested;
 
     // ----- Collections -----------------------------------------------------------
 
@@ -130,6 +159,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     public ICommand StartCommand => _startCommand;
     public ICommand StopCommand => _stopCommand;
+    public ICommand ImportRecordingCommand => _importCommand;
     public ICommand CancelCommand => _cancelCommand;
     public ICommand RefreshDevicesCommand { get; }
     public ICommand BrowseOutputFolderCommand { get; }
@@ -385,6 +415,176 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     private readonly string _modelCacheDirectory;
 
+    // ----- Updates -------------------------------------------------------------------
+
+    private bool _checkForUpdatesOnStartup;
+
+    /// <summary>
+    /// Persisted immediately on change (unlike most of this tab, which only saves on the next
+    /// Start/Import/Browse) - a user who toggles this and never starts a meeting should still
+    /// have it stick.
+    /// </summary>
+    public bool CheckForUpdatesOnStartup
+    {
+        get => _checkForUpdatesOnStartup;
+        set
+        {
+            if (SetProperty(ref _checkForUpdatesOnStartup, value))
+            {
+                SaveSettings();
+            }
+        }
+    }
+
+    private string _updateStatusText = string.Empty;
+
+    /// <summary>
+    /// Result of the last update check/apply. Only ever set from an explicit "Check for
+    /// Updates" click, or from a startup check that actually found (and is acting on, or failed
+    /// to verify) an update - a quiet "no update"/"network failure" startup result never touches
+    /// this, so it stays blank until there is something worth showing.
+    /// </summary>
+    public string UpdateStatusText
+    {
+        get => _updateStatusText;
+        private set => SetProperty(ref _updateStatusText, value);
+    }
+
+    private bool _showOpenReleasePage;
+
+    /// <summary>True only when a newer release exists but could not be safely auto-installed (no verifiable installer asset) - offers a manual fallback instead of silently doing nothing.</summary>
+    public bool ShowOpenReleasePage
+    {
+        get => _showOpenReleasePage;
+        private set => SetProperty(ref _showOpenReleasePage, value);
+    }
+
+    public ICommand CheckForUpdatesCommand => _checkForUpdatesCommand;
+    public ICommand OpenReleasePageCommand => _openReleasePageCommand;
+
+    /// <summary>
+    /// Checks GitHub for a newer release. <paramref name="isExplicit"/> is true only for the
+    /// "Check for Updates" button - it controls whether a non-actionable outcome (no update, a
+    /// network/GitHub failure, or a release with no verifiable installer) is surfaced at all; see
+    /// <see cref="UpdateStatusText"/>'s remarks. A verified update is always downloaded, verified,
+    /// and launched regardless of which path found it; a failed hash check is always shown,
+    /// regardless of which path found it too - see <see cref="ApplyUpdateAsync"/>.
+    /// </summary>
+    private async Task CheckForUpdatesAsync(bool isExplicit)
+    {
+        if (isExplicit)
+        {
+            UpdateStatusText = "Checking for updates...";
+            ShowOpenReleasePage = false;
+        }
+
+        // Startup checks get a shorter budget - this must never keep the app "alive" waiting on
+        // a hung request; an explicit click can reasonably wait a little longer.
+        var timeout = isExplicit ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(6);
+        var result = await _updateChecker.CheckAsync(timeout, CancellationToken.None).ConfigureAwait(true);
+
+        switch (result.Status)
+        {
+            case UpdateCheckStatus.Error:
+                if (isExplicit)
+                {
+                    UpdateStatusText = $"Update check failed: {result.Message}";
+                }
+
+                return;
+
+            case UpdateCheckStatus.UpToDate:
+                if (isExplicit)
+                {
+                    UpdateStatusText = result.LatestVersionRaw is null
+                        ? $"Up to date (running v{UpdateVersion.GetRunningVersion()})."
+                        : $"Up to date (running v{UpdateVersion.GetRunningVersion()}; latest published release is {result.LatestVersionRaw}).";
+                }
+
+                return;
+
+            case UpdateCheckStatus.UpdateAvailable:
+                await ApplyUpdateAsync(result, isExplicit).ConfigureAwait(true);
+                return;
+
+            default:
+                return;
+        }
+    }
+
+    /// <summary>
+    /// A newer release exists. If it has no verifiable installer, this stays silent on a startup
+    /// check (never nags about a release the app cannot safely act on) but is surfaced with a
+    /// manual fallback on an explicit check. Otherwise it downloads, verifies, and launches the
+    /// installer, then requests app exit - a failed hash check (or any other download/verify
+    /// failure once this has actually started) is ALWAYS shown, startup or explicit alike; that
+    /// rule has no quiet exception.
+    /// </summary>
+    private async Task ApplyUpdateAsync(UpdateCheckResult result, bool isExplicit)
+    {
+        _pendingReleaseHtmlUrl = result.ReleaseHtmlUrl;
+
+        if (result.InstallerDownloadUrl is null || result.ChecksumDownloadUrl is null)
+        {
+            if (!isExplicit)
+            {
+                return;
+            }
+
+            UpdateStatusText = $"Update {result.LatestVersionRaw} is available, but this release has no verifiable installer download " +
+                                "(missing SHA256SUMS.txt or the installer asset) - refusing to download and run it unverified.";
+            ShowOpenReleasePage = _pendingReleaseHtmlUrl is not null;
+            return;
+        }
+
+        if (IsRecording || IsBusy)
+        {
+            // Extremely unlikely at startup (this fires before the window is even shown), but
+            // cheap to guard: never download-launch-and-exit out from under an active meeting.
+            UpdateStatusText = $"Update {result.LatestVersionRaw} is available - restart MeetingScribe after this meeting to install it.";
+            return;
+        }
+
+        UpdateStatusText = $"Update {result.LatestVersionRaw} found - downloading...";
+
+        var applyResult = await _updateChecker
+            .DownloadVerifyAndLaunchAsync(result, text => UpdateStatusText = text, CancellationToken.None)
+            .ConfigureAwait(true);
+
+        if (!applyResult.Success)
+        {
+            // Never a silent skip - startup-triggered or not.
+            ErrorMessage = applyResult.Message;
+            UpdateStatusText = "Update failed - see error below.";
+            ShowOpenReleasePage = applyResult.SidecarMissing && _pendingReleaseHtmlUrl is not null;
+            return;
+        }
+
+        UpdateStatusText = "Update verified - launching installer and closing MeetingScribe...";
+        ExitRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OpenReleasePage()
+    {
+        if (_pendingReleaseHtmlUrl is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(_pendingReleaseHtmlUrl) { UseShellExecute = true });
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            ErrorMessage = $"Failed to open release page: {ex.Message}";
+        }
+        catch (InvalidOperationException ex)
+        {
+            ErrorMessage = $"Failed to open release page: {ex.Message}";
+        }
+    }
+
     // ----- Device enumeration --------------------------------------------------------
 
     private void RefreshDevices()
@@ -509,6 +709,94 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
             // resort for anything unexpected slipping past that.
             ErrorMessage = ex.Message;
             StatusText = $"Failed while stopping: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+            IsProgressIndeterminate = false;
+            _stopCts?.Dispose();
+            _stopCts = null;
+        }
+    }
+
+    private bool CanImport() => !IsRecording && !IsBusy && !string.IsNullOrWhiteSpace(OutputRoot);
+
+    /// <summary>
+    /// Lets the user transcribe a recording they already have (a phone, a voice recorder, or a
+    /// meeting-tool export) instead of only recording live. Runs the exact same accurate-pass +
+    /// minutes pipeline <see cref="StopAsync"/> runs after a live recording -
+    /// see <see cref="MeetingSessionController.ImportAsync"/> - so the result lands in the
+    /// Minutes tab and on disk exactly like a recorded meeting's. No-op if the user cancels the
+    /// file picker.
+    /// </summary>
+    private async Task ImportRecordingAsync()
+    {
+        ErrorMessage = null;
+
+        var files = await _topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose a recording to transcribe",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("Audio recordings") { Patterns = ["*.wav", "*.mp3", "*.m4a", "*.mp4"] },
+                new FilePickerFileType("All files") { Patterns = ["*.*"] },
+            ],
+        }).ConfigureAwait(true);
+
+        var file = files.Count > 0 ? files[0] : null;
+        var sourcePath = file?.TryGetLocalPath();
+        if (string.IsNullOrEmpty(sourcePath))
+        {
+            return;
+        }
+
+        var title = string.IsNullOrWhiteSpace(MeetingTitle) ? DefaultTitle() : MeetingTitle.Trim();
+        SaveSettings(title);
+
+        var request = new ImportRequest(
+            Title: title,
+            OutputRoot: OutputRoot,
+            SourceFilePath: sourcePath,
+            FinalModelSize: SelectedFinalModel.Size,
+            ModelCacheDirectory: _modelCacheDirectory,
+            LanguageOverride: string.IsNullOrWhiteSpace(LanguageOverrideText) ? null : LanguageOverrideText.Trim(),
+            AllowedLanguages: string.IsNullOrWhiteSpace(AllowedLanguagesText) ? null : AllowedLanguagesText.Trim(),
+            MinutesPromptTemplate: MinutesPromptTemplate,
+            MinutesTimeoutSeconds: ParseMinutesTimeoutSeconds(),
+            MinutesProvider: SelectedMinutesProviderOption?.Kind ?? MinutesProviderKind.Claude,
+            OllamaBaseUrl: OllamaBaseUrl,
+            OllamaModel: SelectedOllamaModel ?? string.Empty,
+            OllamaNumCtx: ParseOllamaNumCtx());
+
+        // Shares _stopCts with StopAsync - both are "the one long-running pipeline that can be
+        // cancelled" this view model ever has in flight at once (Start/Import are mutually
+        // exclusive with IsRecording/IsBusy, same guard CanImport/CanStart already enforce).
+        _stopCts?.Dispose();
+        _stopCts = new CancellationTokenSource();
+
+        LiveTranscriptLines.Clear();
+        MinutesMarkdown = string.Empty;
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        StatusText = $"Importing {Path.GetFileName(sourcePath)}...";
+
+        try
+        {
+            await _controller.ImportAsync(request, _stopCts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            ErrorMessage = "Cancelled by user.";
+            StatusText = "Cancelled - the source recording is untouched; transcript/minutes for this import were not produced.";
+        }
+        catch (Exception ex)
+        {
+            // MeetingSessionController.ImportAsync() already catches its own internal failures
+            // and raises Failed/Completed instead of throwing; this is a last resort for
+            // anything unexpected slipping past that - same pattern as StopAsync above.
+            ErrorMessage = ex.Message;
+            StatusText = $"Failed to import recording: {ex.Message}";
         }
         finally
         {
@@ -671,6 +959,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 SystemAudioEnabled = SystemAudioEnabled,
                 SystemAudioDeviceId = SelectedSystemDevice?.Id,
                 LastMeetingTitle = lastTitle ?? MeetingTitle,
+                CheckForUpdatesOnStartup = CheckForUpdatesOnStartup,
             };
 
             SettingsStore.Save(settings);
@@ -857,6 +1146,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         _startCommand.RaiseCanExecuteChanged();
         _stopCommand.RaiseCanExecuteChanged();
+        _importCommand.RaiseCanExecuteChanged();
         _cancelCommand.RaiseCanExecuteChanged();
         if (ExportMinutesCommand is AsyncRelayCommand export)
         {

@@ -1,0 +1,26 @@
+<Project>
+  <!--
+    Single source of truth for the product version. MSBuild auto-imports a
+    Directory.Build.props found by walking up from every project file to the
+    first one it finds, so this applies to all projects under this repo root
+    with zero per-csproj wiring (net10.0 SDK-style projects import it before
+    their own PropertyGroup, so a project-level Version property would still
+    win if one is ever added; none is, on purpose, to keep this the only
+    place the number lives).
+
+    Consumers of this single number:
+      - Every built assembly's AssemblyVersion/FileVersion/InformationalVersion
+        (MSBuild derives all three from Version unless overridden).
+      - installer\build-installer.ps1, which parses this file to name the
+        installer .exe and to pass /DMyAppVersion to ISCC.
+      - installer\MeetingScribe.iss's AppVersion and OutputBaseFilename, via
+        that /D (see the #ifndef fallback there for the Inno-IDE-only case).
+      - The in-app updater, which reads its own assembly's version at runtime
+        to compare against the latest GitHub Release tag.
+    Bump it here only. Do not add a competing Version/AssemblyVersion/
+    FileVersion property in any individual .csproj.
+  -->
+  <PropertyGroup>
+    <Version>1.1.0</Version>
+  </PropertyGroup>
+</Project>

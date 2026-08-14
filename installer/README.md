@@ -20,12 +20,27 @@ This does, in order:
 1. `dotnet publish MeetingScribe.App -c Release -f net10.0-windows -r win-x64 --self-contained true -p:PublishSingleFile=true`
 2. `ISCC.exe installer\MeetingScribe.iss`
 3. Prints the output path, size, and SHA-256.
+4. Writes `dist\SHA256SUMS.txt` — one line, `<sha256>  <installer-filename>`,
+   hashing the exact `.exe` this run just produced.
 
 ## Output
 
-`dist\MeetingScribe-Setup-1.0.0-win-x64.exe` — `dist\` is git-ignored, so the
+`dist\MeetingScribe-Setup-1.1.0-win-x64.exe` — `dist\` is git-ignored, so the
 installer artifact itself is never committed; only `installer\*.iss` /
 `*.ps1` (this build recipe) is.
+
+## SHA256SUMS.txt must be attached to every GitHub Release
+
+The in-app updater (`MeetingScribe.App\Services\Update\UpdateChecker.cs`)
+downloads `SHA256SUMS.txt` alongside the installer from the release and
+refuses to run anything that doesn't match it. **This file must be uploaded
+as a second release asset next to the installer `.exe` for every release, or
+the in-app updater will not auto-install that release** — it will tell the
+user it can't verify it and point them at the release page instead, rather
+than run an unverified binary. Builds of this project are not reproducible
+(the PE header embeds a compile timestamp), so a hash checked into source or
+docs would never match a real download — the sidecar this script writes,
+from the artifact actually being shipped, is the only trustworthy source.
 
 ## Unsigned binary — read this before sending it to anyone
 
@@ -79,11 +94,20 @@ MeetingScribe entry (Inno's), not two pointing at the same folder. Verified
 installer silently, both were gone afterward and the new entry installed
 correctly.
 
-## Real measured numbers (2026-08-14 build)
+## Real measured numbers (2026-08-14 build, 1.1.0)
 
-- Installer: `MeetingScribe-Setup-1.0.0-win-x64.exe`, 49,642,873 bytes
-  (47.3 MB).
-- Installed footprint: 211,904,763 bytes (202.1 MB), 11 files — down from
+Exact byte counts and hashes below are a snapshot of one specific build and
+will not match the next rebuild even with zero code changes (LZMA output
+size shifts a few bytes run to run). Do not treat this section as the
+authoritative hash source for a given release — that's what the GitHub
+Releases page asset listing is for; a stale hash checked into a doc that
+nobody remembers to update on every bump is worse than no hash at all. This
+section stays for the qualitative facts (what's excluded and why, what was
+verified) which don't change per-rebuild the way the byte count does.
+
+- Installer: `MeetingScribe-Setup-1.1.0-win-x64.exe`, 49,650,825 bytes
+  (47.4 MB).
+- Installed footprint: 212,072,054 bytes (202.2 MB), 11 files — down from
   an earlier 360.7 MB / 23-file build that shipped debug symbols (`*.pdb`,
   ~100 MB) and a Linux-x64 Vulkan runtime (`runtimes\vulkan\linux-x64\*.so`,
   ~58 MB) that Windows never uses. Both are now excluded: `.pdb` via

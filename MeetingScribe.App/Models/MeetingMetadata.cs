@@ -13,6 +13,14 @@ public sealed class MeetingMetadata
     public required bool SystemAudioEnabled { get; init; }
     public string? SystemAudioDeviceName { get; init; }
 
+    /// <summary>True for a meeting produced by importing an existing recording (see
+    /// <see cref="MeetingScribe.App.Services.MeetingSessionController.ImportAsync"/>) rather than
+    /// live Start/Stop capture - no live (stage 1) pass ever ran for one of these.</summary>
+    public bool Imported { get; init; }
+
+    /// <summary>Original file path the user picked, only set when <see cref="Imported"/> is true.</summary>
+    public string? ImportedSourceFile { get; init; }
+
     public required string LiveModel { get; init; }
     public required string FinalModel { get; init; }
     public string? LanguageOverride { get; init; }
