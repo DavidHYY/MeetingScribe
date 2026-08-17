@@ -207,7 +207,11 @@ jobs:
               exit 1
             fi
           done
-          cat artifacts/windows/SHA256SUMS.txt artifacts/macos/SHA256SUMS.txt > SHA256SUMS.txt
+          # awk 1, not cat: build-installer.ps1 writes its SHA256SUMS.txt without a trailing
+          # newline, so plain concatenation glues the Windows hash line onto the macOS one and
+          # the published file fails `shasum -a 256 -c` (v1.1.3 shipped exactly that way).
+          # `awk 1` re-emits every record newline-terminated, normalising both inputs.
+          awk 1 artifacts/windows/SHA256SUMS.txt artifacts/macos/SHA256SUMS.txt > SHA256SUMS.txt
           echo "Combined SHA256SUMS.txt:"
           cat SHA256SUMS.txt
 
