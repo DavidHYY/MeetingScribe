@@ -1,0 +1,231 @@
+name: Release
+
+# Builds both installers from source on GitHub-hosted runners and attaches them to the
+# GitHub release for a pushed "vX.Y.Z" tag - neither installer depends on, or is built on,
+# any particular machine. See installer/README.md for what each build script does locally;
+# this workflow just runs those same scripts (installer/build-installer.ps1,
+# installer/build-dmg.sh) on a clean checkout per platform.
+#
+# The version is never hardcoded here - it comes from the pushed tag, cross-checked against
+# Directory.Build.props (this repo's single source of truth for the version - see that
+# file's own comment), which is also what build-installer.ps1/build-dmg.sh already parse to
+# name their own output files and what the app's own assemblies report at runtime. A tag
+# that does not match Directory.Build.props fails the "version" job loudly rather than
+# shipping two installers labelled with the wrong number.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Only GITHUB_TOKEN is used anywhere in this workflow (no third-party secrets). contents:
+# write is needed to create/attach assets to the release for the pushed tag.
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Determine and verify version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive version from Directory.Build.props and verify it matches the tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROPS_VERSION="$(grep -o '<Version>[^<]*</Version>' Directory.Build.props | head -n1 | sed -E 's/<Version>([^<]*)<\/Version>/\1/')"
+          if [[ -z "$PROPS_VERSION" ]]; then
+            echo "::error::Could not find '<Version>...</Version>' in Directory.Build.props." >&2
+            exit 1
+          fi
+
+          TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG#v}"
+          if [[ "$TAG_VERSION" != "$PROPS_VERSION" ]]; then
+            echo "::error::Tag '$TAG' (version '$TAG_VERSION') does not match Directory.Build.props Version '$PROPS_VERSION' - the single source of truth every assembly and the in-app updater read. Bump Directory.Build.props before tagging, or re-tag with the version it already has." >&2
+            exit 1
+          fi
+
+          echo "Tag $TAG matches Directory.Build.props version $PROPS_VERSION"
+          echo "version=$PROPS_VERSION" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Build Windows installer
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Locate ISCC.exe where build-installer.ps1 expects it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # installer/build-installer.ps1 hardcodes ISCC.exe at
+          # "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" (Inno Setup 6's own
+          # interactive-installer default, per-user, no admin) - see that script's own
+          # comment on why. Chocolatey's innosetup package installs machine-wide instead
+          # (commonly under Program Files), so copy it into the exact path the existing
+          # script expects rather than editing that script for a CI-only detail. Fails
+          # loudly, listing what was searched, if ISCC.exe isn't found anywhere - never
+          # silently proceeds without it.
+          $expectedDir  = "$env:LOCALAPPDATA\Programs\Inno Setup 6"
+          $expectedIscc = Join-Path $expectedDir 'ISCC.exe'
+
+          if (Test-Path $expectedIscc) {
+            Write-Host "ISCC.exe already at $expectedIscc"
+          } else {
+            $searchRoots = @(
+              'C:\Program Files (x86)\Inno Setup 6',
+              'C:\Program Files\Inno Setup 6',
+              "$env:ChocolateyInstall\lib\innosetup\tools"
+            ) | Where-Object { $_ -and (Test-Path $_) }
+
+            $found = $null
+            foreach ($root in $searchRoots) {
+              $candidate = Get-ChildItem -Path $root -Filter 'ISCC.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($candidate) { $found = $candidate; break }
+            }
+
+            if (-not $found) {
+              throw "ISCC.exe not found after 'choco install innosetup'. Searched: $expectedIscc, $($searchRoots -join ', '). installer/build-installer.ps1 requires it at '$expectedIscc' exactly - update this step if Chocolatey's install location has changed."
+            }
+
+            New-Item -ItemType Directory -Force -Path $expectedDir | Out-Null
+            Copy-Item -Path (Join-Path (Split-Path $found.FullName) '*') -Destination $expectedDir -Recurse -Force
+            if (-not (Test-Path $expectedIscc)) {
+              throw "Copied Inno Setup from $(Split-Path $found.FullName) to $expectedDir but $expectedIscc is still missing."
+            }
+            Write-Host "Copied Inno Setup from $($found.FullName) to $expectedIscc"
+          }
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: ./installer/build-installer.ps1
+
+      - name: Verify installer filename matches the tagged version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = "dist/MeetingScribe-Setup-${{ needs.version.outputs.version }}-win-x64.exe"
+          if (-not (Test-Path $expected)) {
+            throw "Expected '$expected' after build-installer.ps1 - it produced a differently-named file, or none. Directory.Build.props Version and the pushed tag were already checked equal by the 'version' job."
+          }
+          Write-Host "Found $expected"
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/MeetingScribe-Setup-*-win-x64.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: Build macOS installer
+    needs: version
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build macOS dmg
+        run: installer/build-dmg.sh
+
+      - name: Verify dmg filename matches the tagged version
+        run: |
+          set -euo pipefail
+          expected="dist/MeetingScribe-${{ needs.version.outputs.version }}-osx-arm64.dmg"
+          if [[ ! -f "$expected" ]]; then
+            echo "::error::Expected '$expected' after build-dmg.sh - it produced a differently-named file, or none. Directory.Build.props Version and the pushed tag were already checked equal by the 'version' job." >&2
+            exit 1
+          fi
+          echo "Found $expected"
+
+      - name: Upload macOS installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: |
+            dist/MeetingScribe-*-osx-arm64.dmg
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Attach installers to the GitHub release
+    needs: [version, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts/windows
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-installer
+          path: artifacts/macos
+
+      - name: Combine SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          # Each platform job's dist/SHA256SUMS.txt comes from a fresh checkout, so it holds
+          # exactly one "<sha256>  <filename>" line for that job's own installer (same format
+          # installer/build-installer.ps1 and installer/build-dmg.sh both already write, see
+          # their own comments on why). Concatenating them is the whole job: one combined
+          # sidecar covering both installers, still readable by a plain `sha256sum -c`/
+          # `shasum -c` or the in-app updater.
+          for f in artifacts/windows/SHA256SUMS.txt artifacts/macos/SHA256SUMS.txt; do
+            if [[ ! -s "$f" ]]; then
+              echo "::error::$f is missing or empty - cannot build a combined SHA256SUMS.txt." >&2
+              exit 1
+            fi
+          done
+          cat artifacts/windows/SHA256SUMS.txt artifacts/macos/SHA256SUMS.txt > SHA256SUMS.txt
+          echo "Combined SHA256SUMS.txt:"
+          cat SHA256SUMS.txt
+
+      - name: Attach assets to the release for this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(
+            artifacts/windows/MeetingScribe-Setup-*-win-x64.exe
+            artifacts/macos/MeetingScribe-*-osx-arm64.dmg
+            SHA256SUMS.txt
+          )
+          # gh CLI ships preinstalled on GitHub-hosted runners - no extra action needed for
+          # release create/upload, so this step's only credential is GITHUB_TOKEN.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          fi
