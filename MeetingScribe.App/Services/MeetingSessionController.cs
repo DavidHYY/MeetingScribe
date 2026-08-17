@@ -106,6 +106,7 @@ public sealed class MeetingSessionController : IAsyncDisposable
 
     private IMeetingRecorder? _recorder;
     private WhisperTranscriber? _liveTranscriber;
+    private WhisperTranscriber? _finalTranscriber;
     private volatile LiveTranscriptionEngine? _liveEngine;
     private Task? _liveInitTask;
     private StartRequest? _activeRequest;
@@ -190,15 +191,22 @@ public sealed class MeetingSessionController : IAsyncDisposable
             CurrentMeetingFolder = meetingFolder;
             IsRecording = true;
 
-            StatusChanged?.Invoke(this, "Recording. Loading live model...");
+            // Which model actually loads first differs by platform - see
+            // InitializeTranscribersAsync's OperatingSystem.IsMacOS() gate for why. This message
+            // just names whichever one that is so it doesn't say "live" while the accurate model
+            // loads first underneath it on macOS.
+            StatusChanged?.Invoke(this, OperatingSystem.IsMacOS()
+                ? "Recording. Loading accurate model..."
+                : "Recording. Loading live model...");
 
             // Intentionally not awaited here so Start() returns as soon as capture is
             // live - but the task IS retained (not fire-and-forget): StopAsync awaits it
-            // before touching _liveEngine/_liveTranscriber, otherwise a Stop() that lands
-            // while the model is still loading could race this initialization and leak
-            // the live model (loaded after Stop already decided there was nothing to
-            // dispose). Exceptions are caught inside and reported, never left unobserved.
-            _liveInitTask = InitializeLiveEngineAsync(request, cancellationToken);
+            // before touching _liveEngine/_liveTranscriber/_finalTranscriber, otherwise a
+            // Stop() that lands while a model is still loading could race this
+            // initialization and leak it (loaded after Stop already decided there was
+            // nothing to dispose). Exceptions are caught inside and reported, never left
+            // unobserved.
+            _liveInitTask = InitializeTranscribersAsync(request, cancellationToken);
         }
         finally
         {
@@ -366,8 +374,79 @@ public sealed class MeetingSessionController : IAsyncDisposable
         }
     }
 
-    private async Task InitializeLiveEngineAsync(StartRequest request, CancellationToken cancellationToken)
+    /// <summary>
+    /// Loads the live (rough) model in the background while recording runs, same as this method
+    /// always has. On macOS ONLY (see the <see cref="OperatingSystem.IsMacOS"/> gate below) the
+    /// final/accurate model is also loaded here, first, before the live model. Every other
+    /// platform - Windows in particular, the platform in daily use - keeps today's original
+    /// order unchanged: only the live model loads here, and <see cref="StopAsync"/> loads the
+    /// final/accurate model fresh, exactly as before this method grew a macOS branch.
+    /// </summary>
+    private async Task InitializeTranscribersAsync(StartRequest request, CancellationToken cancellationToken)
     {
+        // macOS-only: ggml-metal's Metal backend can only be claimed by the FIRST
+        // WhisperFactory constructed in a process - a second one (whether or not the first
+        // was disposed first) silently falls back to Cpu with no exception (confirmed
+        // empirically - MeetingScribe repo issue #6 - by constructing two transcribers in
+        // one process every possible order/disposal combination; only creation order
+        // determined which one got Metal). Loading the final/accurate model here, before the
+        // live model, gives Metal to the pass that matters more for speed (final, potentially
+        // the large/slow model, run once per meeting) instead of losing it by accident to
+        // whichever model happened to load first chronologically.
+        //
+        // DO NOT lift this reorder out of the OperatingSystem.IsMacOS() check to "simplify"
+        // it for every platform: on Windows (the platform in daily use, and the only one this
+        // reorder has never been run on) it would make the large/accurate model start loading
+        // the instant recording begins - adding startup latency and holding that model's
+        // memory for the whole meeting - to solve a macOS-only Metal-claim race that Windows
+        // does not have. Windows must keep exactly today's order: live model loads here,
+        // accurate model loads fresh in StopAsync (see the null-check on _finalTranscriber
+        // there).
+        //
+        // Everything else this reorder touches - the _finalTranscriber field, StopAsync's
+        // "use it if pre-loaded, else load fresh" fallback, and every DisposeAsync call site
+        // for it - is deliberately left UNCONDITIONAL rather than also gated on
+        // OperatingSystem.IsMacOS(): this method is the only place anything ever assigns
+        // _finalTranscriber, so on every non-macOS platform it simply stays null for the whole
+        // session, which makes every one of those call sites a correct no-op there and makes
+        // StopAsync's "else load fresh" branch fire unconditionally - i.e. Windows runs the
+        // exact same code path it always did, not a parallel implementation that could drift
+        // from it.
+        if (OperatingSystem.IsMacOS())
+        {
+            try
+            {
+                var finalOptions = new WhisperTranscriberOptions
+                {
+                    ModelSize = request.FinalModelSize,
+                    ModelCacheDirectory = request.ModelCacheDirectory,
+                    LanguageOverride = request.LanguageOverride,
+                    AllowedLanguages = ParseAllowedLanguages(request.AllowedLanguages),
+                };
+
+                _finalTranscriber = await WhisperTranscriber.CreateAsync(finalOptions, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Not fatal here: StopAsync falls back to loading the final model itself
+                // (see the null-check there) if it is still null by the time it needs it -
+                // that fallback loses the Metal-ordering guarantee above (the live model
+                // below would then be the first WhisperFactory and would claim Metal
+                // instead), but still produces a correct, if slower, accurate transcript
+                // rather than losing stage 2 entirely over a transient load failure.
+                RecorderErrorOccurred?.Invoke(this, $"Accurate model failed to pre-load: {ex.Message}");
+            }
+
+            // Second-stage status update - only needed on macOS, where the accurate-model
+            // preload above already changed the status once (StartAsync's own message said
+            // "Loading accurate model..."). On every other platform StartAsync already said
+            // "Recording. Loading live model..." immediately before this method was called
+            // and nothing has happened since, so re-emitting the identical string here would
+            // just be a redundant duplicate event - not "exactly today's behaviour".
+            StatusChanged?.Invoke(this, "Recording. Loading live model...");
+        }
+
         try
         {
             var options = new WhisperTranscriberOptions
@@ -450,10 +529,10 @@ public sealed class MeetingSessionController : IAsyncDisposable
             recorderErrors = [.. recorder.Errors];
             IsRecording = false;
 
-            // Wait for InitializeLiveEngineAsync to finish first (it may still be
+            // Wait for InitializeTranscribersAsync to finish first (it may still be
             // mid-flight if Stop() lands right after Start()) - otherwise it can assign
-            // _liveEngine/_liveTranscriber after the null-checks below already ran,
-            // leaking the just-loaded live model instead of disposing it.
+            // _liveEngine/_liveTranscriber/_finalTranscriber after the null-checks below
+            // already ran, leaking a just-loaded model instead of disposing it.
             if (_liveInitTask is not null)
             {
                 try
@@ -462,7 +541,7 @@ public sealed class MeetingSessionController : IAsyncDisposable
                 }
                 catch (OperationCanceledException)
                 {
-                    // Already reported (if applicable) inside InitializeLiveEngineAsync's
+                    // Already reported (if applicable) inside InitializeTranscribersAsync's
                     // own catch; nothing more to do here.
                 }
 
@@ -517,19 +596,37 @@ public sealed class MeetingSessionController : IAsyncDisposable
 
             if (tracks.Count > 0)
             {
-                StatusChanged?.Invoke(this, "Loading accurate model for final pass...");
+                // On macOS, normally already loaded (and Metal-claiming) from Start() -
+                // InitializeTranscribersAsync loads the final model FIRST, before the live
+                // model, specifically so it wins the process's one-shot Metal claim (see that
+                // method's doc comment). On Windows this is always null here (Start() never
+                // assigns it - see that method's OperatingSystem.IsMacOS() gate), so the
+                // fallback below always fires there, same as before this field existed. Either
+                // way, this fallback also covers a macOS pre-load that failed or has not
+                // finished by the time Stop() needs it (e.g. a very short recording) - it
+                // still produces a correct transcript, just without the Metal-ordering
+                // guarantee, since the live model was necessarily created first in that case.
+                var finalTranscriber = _finalTranscriber;
+                _finalTranscriber = null;
 
-                var finalOptions = new WhisperTranscriberOptions
+                if (finalTranscriber is null)
                 {
-                    ModelSize = request.FinalModelSize,
-                    ModelCacheDirectory = request.ModelCacheDirectory,
-                    LanguageOverride = request.LanguageOverride,
-                    AllowedLanguages = ParseAllowedLanguages(request.AllowedLanguages),
-                };
+                    StatusChanged?.Invoke(this, "Loading accurate model for final pass...");
 
-                await using var finalTranscriber = await WhisperTranscriber.CreateAsync(finalOptions, cancellationToken: cancellationToken)
-                    .ConfigureAwait(false);
-                finalBackend = finalTranscriber.Backend;
+                    var finalOptions = new WhisperTranscriberOptions
+                    {
+                        ModelSize = request.FinalModelSize,
+                        ModelCacheDirectory = request.ModelCacheDirectory,
+                        LanguageOverride = request.LanguageOverride,
+                        AllowedLanguages = ParseAllowedLanguages(request.AllowedLanguages),
+                    };
+
+                    finalTranscriber = await WhisperTranscriber.CreateAsync(finalOptions, cancellationToken: cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                await using var finalTranscriberOwned = finalTranscriber;
+                finalBackend = finalTranscriberOwned.Backend;
 
                 var progress = new Progress<FinalProgress>(p =>
                 {
@@ -538,7 +635,7 @@ public sealed class MeetingSessionController : IAsyncDisposable
                 });
 
                 var trackResults = await new FinalTranscriptionEngine()
-                    .TranscribeTracksAsync(finalTranscriber, tracks, progress, cancellationToken)
+                    .TranscribeTracksAsync(finalTranscriberOwned, tracks, progress, cancellationToken)
                     .ConfigureAwait(false);
 
                 finalTranscript = TranscriptMerger.Merge(trackResults);
@@ -550,6 +647,16 @@ public sealed class MeetingSessionController : IAsyncDisposable
             else
             {
                 StatusChanged?.Invoke(this, "No audio captured; skipping final transcription.");
+
+                // No tracks to transcribe, but on macOS the final model may still have been
+                // pre-loaded at Start() - do not leak it. Always null on Windows (see the
+                // OperatingSystem.IsMacOS() gate in InitializeTranscribersAsync), so this is a
+                // no-op there.
+                if (_finalTranscriber is not null)
+                {
+                    await _finalTranscriber.DisposeAsync().ConfigureAwait(false);
+                    _finalTranscriber = null;
+                }
             }
 
             string? minutesMarkdown = null;
@@ -588,6 +695,17 @@ public sealed class MeetingSessionController : IAsyncDisposable
         }
         finally
         {
+            // Safety net for the exception path above: any throw between Start() and the
+            // tracks-handling block (e.g. recorder.StopAsync() itself failing) skips past the
+            // normal consume-or-fallback logic there and would otherwise leak a fully-loaded
+            // model. Always null on Windows (see InitializeTranscribersAsync's
+            // OperatingSystem.IsMacOS() gate), so this is a no-op there.
+            if (_finalTranscriber is not null)
+            {
+                await _finalTranscriber.DisposeAsync().ConfigureAwait(false);
+                _finalTranscriber = null;
+            }
+
             lock (_stateLock)
             {
                 IsBusy = false;
@@ -778,6 +896,14 @@ public sealed class MeetingSessionController : IAsyncDisposable
         if (_liveTranscriber is not null)
         {
             await _liveTranscriber.DisposeAsync().ConfigureAwait(false);
+        }
+
+        // Always null on Windows (see InitializeTranscribersAsync's OperatingSystem.IsMacOS()
+        // gate) - only ever populated on macOS if Start() ran and StopAsync() has not yet
+        // consumed it, e.g. the app is closed mid-recording.
+        if (_finalTranscriber is not null)
+        {
+            await _finalTranscriber.DisposeAsync().ConfigureAwait(false);
         }
 
         if (_recorder is not null)

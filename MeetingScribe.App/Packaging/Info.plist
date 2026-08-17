@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template copied verbatim into MeetingScribe.app/Contents/Info.plist by the
+  CreateMacOSAppBundle MSBuild target in MeetingScribe.App.csproj (macOS-host-only -
+  see that target's doc comment). CFBundleVersion/CFBundleShortVersionString are fixed
+  at the csproj's default Version (1.0.0, see `dotnet msbuild -getProperty:Version`)
+  rather than templated, since this project does not yet version its releases - bump
+  both here by hand alongside a real <Version> in MeetingScribe.App.csproj if that
+  changes.
+
+  CFBundleName/CFBundleDisplayName is what fixes the process registering as "Avalonia
+  Application" in the menu bar/Dock/Screen & System Audio Recording permission list
+  (MeetingScribe repo issue #4) - confirmed no Avalonia-level app-name setting exists
+  separately (searched libAvaloniaNative.dylib's strings for CFBundleName/
+  bundleName/applicationName - no hits), so this bundle's Info.plist is the only place
+  that name comes from once the process is launched from Contents/MacOS/ inside a real
+  .app bundle rather than as a bare apphost/dll.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>MeetingScribe</string>
+  <key>CFBundleDisplayName</key>
+  <string>MeetingScribe</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.ohmplus.meetingscribe</string>
+  <key>CFBundleExecutable</key>
+  <string>MeetingScribe.App</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleVersion</key>
+  <string>1.0.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleIconFile</key>
+  <string>icon.icns</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <!--
+    Required for the microphone TCC prompt to show any explanation at all (macOS
+    refuses to even show the prompt without one - the process just fails the mic
+    open silently/with a permission-denied error and no dialog). One track of the
+    meeting recording is the user's own mic; this sentence is shown verbatim in
+    System Settings > Privacy & Security > Microphone.
+  -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>MeetingScribe records your microphone as one of the two meeting audio tracks (the other is system audio), so it can produce a transcript and minutes of this meeting.</string>
+  <!--
+    Screen & System Audio Recording (ScreenCaptureKit, used for the system-audio
+    track - see MacSystemPipeline) is authorized via a system dialog with no
+    app-provided usage-description string (unlike microphone/camera), but still
+    needs the stable CFBundleIdentifier above to persist the grant across launches.
+  -->
+</dict>
+</plist>

@@ -1,7 +1,19 @@
+<!--
+  Name="MeetingScribe" is required on macOS beyond the Info.plist bundle name
+  (MeetingScribe.App/Packaging/Info.plist's CFBundleName/CFBundleDisplayName):
+  verified empirically (repo issue #4) that Info.plist alone is NOT enough - a
+  correctly ad-hoc-signed, correctly-Info.plist'd .app bundle still registered with
+  macOS Launch Services as "Avalonia Application" (confirmed via `lsappinfo list`
+  even against a brand-new, never-before-seen CFBundleIdentifier, which rules out a
+  stale Launch Services cache). Avalonia's own Application.Name defaults to
+  "Avalonia Application" and is what the macOS backend actually reports for the
+  running process/menu bar, independent of the bundle's Info.plist.
+-->
 <Application x:Class="MeetingScribe.App.App"
              xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:conv="clr-namespace:MeetingScribe.App.Converters"
+             Name="MeetingScribe"
              RequestedThemeVariant="Default">
 
     <Application.DataTemplates>

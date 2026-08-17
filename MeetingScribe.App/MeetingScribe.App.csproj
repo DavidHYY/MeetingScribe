@@ -86,4 +86,93 @@
     <Compile Remove="Bootstrap\AudioPlatformProvider.Other.cs" Condition="'$(TargetFramework)' == 'net10.0-windows'" />
   </ItemGroup>
 
+  <!--
+    macOS .app bundle: MSBuild target, macOS-host-only - guarded on
+    IsOSPlatform('OSX') using the exact same idiom already used elsewhere in this
+    solution (MeetingScribe.Audio.Mac.csproj's BuildMacNativeAudioHelper target,
+    MeetingScribe.Whisper.csproj's runtime-package selection) so it can never fire on
+    the Windows build. `dotnet build MeetingScribeCS.sln` never invokes the Publish
+    target at all, so this is inert there too - belt and suspenders.
+
+    Fires after `dotnet publish -f net10.0 -r osx-arm64` (optionally with the
+    self-contained flag set true) and turns the publish output into MeetingScribe.app:
+      - Copies every published file into Contents/MacOS/.
+      - Writes Contents/Info.plist from the committed Packaging/Info.plist template -
+        CFBundleIdentifier (com.ohmplus.meetingscribe), CFBundleName/
+        CFBundleDisplayName = MeetingScribe (see that file's doc comment: this, not
+        anything Avalonia-side, is what fixes the process registering as "Avalonia
+        Application" in the menu bar/Dock/Screen & System Audio Recording permission
+        list - MeetingScribe repo issue #4), and NSMicrophoneUsageDescription (macOS
+        won't show the mic TCC prompt at all without one).
+      - Copies assets/icon.icns as the bundle icon, if it exists (generate it via
+        `sh tools/generate_icns.sh` - see that script and tools/generate_icons.py).
+        Skipped, not a build failure, when absent - the ask was "skip rather than
+        block", and a missing custom icon still leaves a launchable, correctly-
+        identified bundle.
+      - Ad-hoc codesigns the whole bundle (codesign, forced, deep, ad-hoc identity).
+        A stable CFBundleIdentifier/bundle path plus a signature (ad-hoc is enough) is
+        what lets a TCC (mic/screen-recording) grant persist across relaunches -
+        without a bundle identity at all, macOS has nothing stable to attach the
+        grant to and re-prompts, or attributes the grant to whatever process
+        launched it (e.g. Terminal), every time.
+
+    A framework-dependent publish of this same bundle still won't launch against a
+    Homebrew-only .NET install (missing_runtime - see issue #4); this target does not
+    force self-contained publishing, it bundles whatever `dotnet publish` produced,
+    but publishing self-contained is what actually makes the resulting .app
+    launchable via `open` on a machine with no system-wide .NET at
+    /usr/local/share/dotnet.
+  -->
+  <Target Name="CreateMacOSAppBundle"
+          AfterTargets="Publish"
+          Condition="$([MSBuild]::IsOSPlatform('OSX')) AND $(RuntimeIdentifier.StartsWith('osx'))">
+    <PropertyGroup>
+      <!--
+        Deliberately NOT "$(PublishDir)../MeetingScribe.app/": that directory
+        (bin/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/) already
+        directly contains the published apphost executable named literally
+        "MeetingScribe.App" (from AssemblyName above), and macOS's default
+        case-insensitive-but-case-preserving APFS treats "MeetingScribe.App" and
+        "MeetingScribe.app" as the same path - MakeDir on the latter collided with
+        the former and failed with MSB3191 (verified: reproduced, then fixed by
+        moving the bundle one directory deeper, into a fresh "bundle/" subfolder
+        nothing else writes into). Putting the bundle in its own "bundle/"
+        subdirectory of that same output folder avoids the collision entirely.
+      -->
+      <MacOSAppBundleDir Condition="'$(MacOSAppBundleDir)' == ''">$(PublishDir)../bundle/MeetingScribe.app/</MacOSAppBundleDir>
+      <MacOSBundleContentsDir>$(MacOSAppBundleDir)Contents/</MacOSBundleContentsDir>
+      <MacOSBundleMacOSDir>$(MacOSBundleContentsDir)MacOS/</MacOSBundleMacOSDir>
+      <MacOSBundleResourcesDir>$(MacOSBundleContentsDir)Resources/</MacOSBundleResourcesDir>
+      <MacOSBundleIconSource>$(MSBuildProjectDirectory)/../assets/icon.icns</MacOSBundleIconSource>
+    </PropertyGroup>
+
+    <!-- Rebuilt from scratch every publish so a stale file from a previous RID/config
+         never lingers inside the bundle. -->
+    <RemoveDir Directories="$(MacOSAppBundleDir)" Condition="Exists('$(MacOSAppBundleDir)')" />
+    <MakeDir Directories="$(MacOSBundleMacOSDir)" />
+    <MakeDir Directories="$(MacOSBundleResourcesDir)" />
+
+    <ItemGroup>
+      <MacOSPublishedFile Include="$(PublishDir)**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MacOSPublishedFile)"
+          DestinationFolder="$(MacOSBundleMacOSDir)%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/Packaging/Info.plist" DestinationFolder="$(MacOSBundleContentsDir)" />
+
+    <Copy SourceFiles="$(MacOSBundleIconSource)"
+          DestinationFiles="$(MacOSBundleResourcesDir)icon.icns"
+          Condition="Exists('$(MacOSBundleIconSource)')" />
+    <Message Importance="high"
+             Text="MeetingScribe.app: no icon.icns at $(MacOSBundleIconSource) - shipping without a custom bundle icon (run tools/generate_icns.sh to add one). Not a build failure."
+             Condition="!Exists('$(MacOSBundleIconSource)')" />
+
+    <!-- Ad-hoc sign (no Apple Developer identity available/required for local
+         acceptance testing) - "-" is codesign's documented ad-hoc signing identity. -->
+    <Exec Command="codesign --force --deep --sign - &quot;$(MacOSAppBundleDir)&quot;" />
+
+    <Message Importance="high" Text="Created $(MacOSAppBundleDir) (ad-hoc signed)." />
+  </Target>
+
 </Project>

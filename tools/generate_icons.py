@@ -14,6 +14,10 @@ Produces:
 
 Regenerate this any time assets/icon.svg changes - the .ico/.png files are
 derived output and are not hand-edited.
+
+macOS's assets/icon.icns is a separate, macOS-only artifact - after re-running
+this script, also run `sh tools/generate_icns.sh` (uses sips/iconutil, not
+cairosvg/Pillow) to refresh it from the icon-512.png this script just wrote.
 """
 
 from __future__ import annotations
