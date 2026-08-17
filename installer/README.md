@@ -5,6 +5,34 @@ Inno Setup replacement for the hand-rolled `dist\install.ps1` /
 `%LocalAppData%\Programs\MeetingScribe`, no admin, no UAC prompt), packaged
 as one double-click `.exe`.
 
+## macOS
+
+`installer/build-dmg.sh` (bash, `set -euo pipefail`, macOS-host-only) does,
+in order:
+
+1. `dotnet publish MeetingScribe.App -c Release -f net10.0 -r osx-arm64 --self-contained true`
+   — this also triggers `CreateMacOSAppBundle`, the macOS-host-only MSBuild
+   target in `MeetingScribe.App.csproj` that turns the publish output into
+   an ad-hoc-signed `MeetingScribe.app`.
+2. `hdiutil create` packages that `.app` plus an `/Applications` symlink
+   into a drag-install `.dmg`.
+3. Prints the output path, size, and SHA-256.
+4. Appends one line to `dist/SHA256SUMS.txt` — same `<sha256>  <filename>`
+   format as the Windows sidecar (see "SHA256SUMS.txt must be attached to
+   every GitHub Release" below).
+
+Output: `dist/MeetingScribe-1.1.2-osx-arm64.dmg` (`dist/` is git-ignored,
+same as the Windows installer).
+
+**Unsigned, not notarized** — ad-hoc `codesign` only, no Apple Developer
+certificate involved or required. First launch on a machine that downloaded
+the `.dmg` shows Gatekeeper's "Apple could not verify this app is free of
+malware" / unidentified-developer warning; the user must right-click the app
+→ Open once (or System Settings → Privacy & Security → Open Anyway).
+
+Requires an Apple Silicon Mac (`osx-arm64`) with the .NET 10 SDK; not tested
+on Intel Macs or on macOS versions older than 26.5.
+
 ## Build
 
 ```powershell

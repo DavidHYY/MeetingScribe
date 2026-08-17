@@ -631,7 +631,7 @@ Requires the .NET 10 SDK.
 dotnet build MeetingScribeCS.sln -c Release
 ```
 
-Run the app (Windows only - the only TFM with a real audio provider):
+Run the app (`net10.0-windows` on Windows, `net10.0` on macOS - both TFMs have a real audio provider; see `installer/README.md` for the macOS `.dmg`):
 
 ```
 dotnet run --project MeetingScribe.App -c Release -f net10.0-windows
